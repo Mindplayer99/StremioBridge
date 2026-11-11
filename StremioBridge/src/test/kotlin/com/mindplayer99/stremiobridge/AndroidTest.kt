@@ -75,7 +75,7 @@ class AndroidTest {
                             path == "/meta/meta/series/tvdb%3A9.json" ->
                                 """{"meta":{"id":"tvdb:9","type":"series","name":"Anime","genres":["Anime"],"videos":[{"id":"kitsu:99:4","season":3,"episode":4}]}}"""
                             path == "/meta/meta/movie/tt123.json" ->
-                                """{"meta":{"id":"tt123","type":"movie","name":"Movie","runtime":"1h 20m"}}"""
+                                """{"meta":{"id":"tt123","type":"movie","name":"Movie","runtime":"1h 20m","app_extras":{"cast":[{"name":"Fixture Actor","character":"Lead","photo":"https://fixture.invalid/actor.jpg"}]}}}"""
                             path in
                                 setOf(
                                     "/play/stream/series/kitsu%3A99%3A4.json",
@@ -123,6 +123,8 @@ class AndroidTest {
             assertEquals(listOf(0, 4), series.episodes.map { it.episode })
             val movie = provider.load(cards[1].url) as MovieLoadResponse
             assertEquals(80, movie.duration)
+            assertEquals("https://fixture.invalid/actor.jpg", movie.actors!!.single().actor.image)
+            assertEquals("Lead", movie.actors!!.single().roleString)
             val anime =
                 (provider.load(cards[2].url) as AnimeLoadResponse)
                     .episodes

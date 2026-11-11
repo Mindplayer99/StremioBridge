@@ -1,7 +1,6 @@
 package com.mindplayer99.stremiobridge
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -55,12 +54,7 @@ internal class BridgeProvider(private val profile: Profile, private val refs: Re
     override val mainPage = run {
         val used = mutableSetOf<String>()
         routes.values.map { r ->
-            val base =
-                r.title.ifBlank {
-                    listOf(profile.catalog(r)!!.name, r.type)
-                        .plus(r.args.values)
-                        .joinToString(" · ")
-                }
+            val base = rowTitle(profile, r)
             var title = base
             var n = 1
             val addon = profile.addons.first { it.key == r.addon }.manifest!!.name
@@ -227,7 +221,8 @@ internal class BridgeProvider(private val profile: Profile, private val refs: Re
                 }
             result.apply {
                 posterUrl = art(j.str("poster") ?: tile.meta.str("poster"))
-                backgroundPosterUrl = art(j.str("background") ?: tile.meta.str("background"))
+                backgroundPosterUrl =
+                    art(j.str("background")) ?: art(tile.meta.str("background")) ?: posterUrl
                 logoUrl = art(j.str("logo"))
                 plot = j.str("description") ?: tile.meta.str("description")
                 year =
@@ -241,7 +236,7 @@ internal class BridgeProvider(private val profile: Profile, private val refs: Re
                         .filter { it.str("category").equals(category, true) }
                         .mapNotNull { it.str("name") }
                 tags = (j.strings("genres") + j.strings("genre") + names("Genres")).distinct()
-                addActors((j.strings("cast") + names("Cast")).distinct())
+                actors = mergeCast(castData(j, ::art), castData(tile.meta, ::art))
             }
         }
 
@@ -253,8 +248,27 @@ internal class BridgeProvider(private val profile: Profile, private val refs: Re
     ): Boolean =
         withContext(Dispatchers.IO) {
             val video = refs.video(profile.key, data)
-            val links = playback.links(video, isCasting)
-            for (link in links) callback(BridgeLink(link))
+            val delivered = java.util.Collections.synchronizedSet(mutableSetOf<Link>())
+            val links =
+                playback.links(video, isCasting) { batch ->
+                    val available =
+                        batch
+                            .mapNotNull { link ->
+                                profile.addons
+                                    .firstOrNull { it.key == link.addon }
+                                    ?.let { NativeSources.name(profile, it, link.debrid) }
+                            }
+                            .toSet()
+                    val grouped = NativeSources.prepare(profile, available)
+                    for (link in batch) if (delivered.add(link)) {
+                        val addon = profile.addons.firstOrNull { it.key == link.addon }
+                        val source =
+                            if (grouped && addon != null)
+                                NativeSources.name(profile, addon, link.debrid)
+                            else link.source
+                        callback(BridgeLink(link.copy(source = source)))
+                    }
+                }
             for (c in playback.subtitles(video, links)) subtitleCallback(
                 newSubtitleFile(c.lang, c.url)
             )

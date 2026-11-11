@@ -160,7 +160,7 @@ class SettingsVisualTest {
         val bitmap = Bitmap.createBitmap(decor.width, decor.height, Bitmap.Config.ARGB_8888)
         decor.draw(Canvas(bitmap))
         val directory =
-            File(System.getProperty("java.io.tmpdir"), "stremiobridge-ui-v3").apply { mkdirs() }
+            File(System.getProperty("java.io.tmpdir"), "stremiobridge-ui-v4").apply { mkdirs() }
         File(directory, "$name.png").outputStream().use {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
         }
@@ -343,7 +343,7 @@ class SettingsVisualTest {
             name.setText("New profile")
             click("Create profile")
             click("Home rows")
-            click("Choose catalogs")
+            click("Add catalogs")
             render(activity, "empty-picker-$mode", heightDp = 520)
             assertFalse(target("Add selected").isEnabled)
             back()
@@ -395,21 +395,53 @@ class SettingsVisualTest {
         withSettings(listOf(p)) { activity, store ->
             val before = profileJson(store.all().single()).toString()
             click("Cinema")
+            click("Addons")
+            render(activity, "addons-landscape", widthDp = 560, heightDp = 312)
+            visible("Add addons")
+            visible("Edit order")
+            click("Edit order")
+            render(activity, "addons-order-landscape", widthDp = 560, heightDp = 312)
+            visible("Done ordering")
+            val viewRoot =
+                org.robolectric.util.ReflectionHelpers.callInstanceMethod<Any>(
+                    dialog().window!!.decorView,
+                    "getViewRootImpl",
+                )
+            org.robolectric.util.ReflectionHelpers.callInstanceMethod<Boolean>(
+                viewRoot,
+                "ensureTouchModeLocally",
+                org.robolectric.util.ReflectionHelpers.ClassParameter.from(
+                    Boolean::class.javaPrimitiveType!!,
+                    false,
+                ),
+            )
+            shadowOf(Looper.getMainLooper()).idle()
+            val arrow = views().single { it.contentDescription == "Move AIOMetadata up" }
+            assertTrue(
+                "Arrow is not focusable; touch mode=${arrow.isInTouchMode}, shown=${arrow.isShown}, enabled=${arrow.isEnabled}, focusable=${arrow.isFocusable}",
+                arrow.requestFocus(),
+            )
+            arrow.performClick()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue(
+                views().single { it.contentDescription == "Move AIOMetadata down" }.isFocused
+            )
+            back()
             click("Home rows")
-            click("Choose catalogs")
+            click("Add catalogs")
             render(activity, "picker-landscape", widthDp = 560, heightDp = 312)
             visible("Add selected")
             val search = views().filterIsInstance<EditText>().single()
             val list = views().filterIsInstance<ListView>().single()
-            list.performItemClick(null, 2, 2)
+            list.performItemClick(null, 1, 1)
             search.setText("Collection 3")
             render(activity, "picker-filtered-landscape", widthDp = 560, heightDp = 312)
             assertEquals(1, list.count)
             list.performItemClick(null, 0, 0)
             search.setText("")
             render(activity, "picker-selected-landscape", widthDp = 560, heightDp = 312)
+            assertTrue(list.isItemChecked(1))
             assertTrue(list.isItemChecked(2))
-            assertTrue(list.isItemChecked(3))
             val add = target("Add 2 rows")
             assertTrue(add.requestFocusFromTouch())
             assertTrue(add.isFocused)
@@ -458,6 +490,37 @@ class SettingsVisualTest {
             assertTrue(SettingsPalette.contrast(palette.onAccent, accent) >= 4.5)
             assertTrue(SettingsPalette.contrast(palette.onAccent, palette.accentPressed) >= 4.5)
             assertTrue(SettingsPalette.contrast(palette.outline, palette.row) >= 3.0)
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w320dp-h568dp-xhdpi")
+    fun amoledPreferencePersistsAndLightThemeRemainsLight() {
+        withSettings(listOf(profile())) { activity, store ->
+            val before = store.all().map { profileJson(it).toString() }
+            if (!activity.getSharedPreferences("stremiobridge-ui", 0).getBoolean("amoled", false))
+                click("AMOLED black")
+            render(activity, "amoled-profiles", heightDp = 520)
+            val check = SettingsView(activity) {}
+            assertEquals(Color.BLACK, check.palette.surface)
+            click("Cinema")
+            click("Home rows")
+            click("Edit order")
+            render(activity, "amoled-order-narrow", heightDp = 520)
+            visible("Done ordering")
+            assertEquals(before, store.all().map { profileJson(it).toString() })
+        }
+        withSettings(emptyList(), light = true) { activity, _ ->
+            // The preference persists through the host-theme change.
+            assertTrue(
+                activity.getSharedPreferences("stremiobridge-ui", 0).getBoolean("amoled", false)
+            )
+            assertNotEquals(Color.BLACK, SettingsView(activity) {}.palette.surface)
+            render(activity, "amoled-light", heightDp = 520)
+            click("AMOLED black")
+            assertFalse(
+                activity.getSharedPreferences("stremiobridge-ui", 0).getBoolean("amoled", true)
+            )
         }
     }
 

@@ -2,6 +2,9 @@ package com.mindplayer99.stremiobridge
 
 import java.net.URI
 import java.util.TreeMap
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 internal data class Video(
@@ -33,6 +36,7 @@ internal data class Link(
     val size: Long?,
     val file: String?,
     val group: String?,
+    val debrid: Boolean = false,
 )
 
 internal fun httpUrl(raw: String?): String? {
@@ -118,7 +122,12 @@ internal fun adapt(a: Addon, s: JSONObject, casting: Boolean): Link? {
     return Link(
         a.key,
         source,
-        label,
+        streamLabel(
+            source,
+            label,
+            height,
+            data?.optJSONObject("service")?.opt("cached") as? Boolean,
+        ),
         url,
         format,
         height,
@@ -129,11 +138,12 @@ internal fun adapt(a: Addon, s: JSONObject, casting: Boolean): Link? {
         hints.opt("videoSize")?.toString()?.toLongOrNull()?.takeIf { it > 0 },
         file,
         hints.str("bingeGroup"),
+        isDebridStream(s),
     )
 }
 
 internal class Playback(private val p: Profile, private val transport: Transport) {
-    suspend fun links(v: Video, casting: Boolean): List<Link> {
+    suspend fun links(v: Video, casting: Boolean, onBatch: (List<Link>) -> Unit = {}): List<Link> {
         val owner =
             p.addons.find { it.key == v.inline && it.uses("meta") && "stream" in it.switches }
         if (owner != null && v.parent != null)
@@ -151,25 +161,38 @@ internal class Playback(private val p: Profile, private val transport: Transport
                             .distinct()
                 }
                 .orEmpty()
-        return p.addons
-            .filter { it.uses("stream") }
-            .independent(125_000) { a ->
-                for (id in v.ids) {
-                    if (!a.manifest!!.accepts("stream", v.type, id)) continue
-                    val links =
-                        attempt {
-                                transport
-                                    .get(Endpoint(a.url).resource("stream", v.type, id), true)
-                                    .objects("streams")
-                                    .mapNotNull { adapt(a, it, casting) }
-                            }
-                            .orEmpty()
-                    if (links.isNotEmpty()) return@independent links
+                .also(onBatch)
+        val delivery = Mutex()
+        return coroutineScope {
+            p.addons
+                .filter { it.uses("stream") }
+                .map { a ->
+                    async {
+                        val batch = withTimeoutOrNull(125_000) { fetch(a, v, casting) }.orEmpty()
+                        delivery.withLock { onBatch(batch) }
+                        batch
+                    }
                 }
-                emptyList()
-            }
-            .flatten()
-            .distinct()
+                .awaitAll()
+                .flatten()
+                .distinct()
+        }
+    }
+
+    private suspend fun fetch(a: Addon, v: Video, casting: Boolean): List<Link> {
+        for (id in v.ids) {
+            if (!a.manifest!!.accepts("stream", v.type, id)) continue
+            val links =
+                attempt {
+                        transport
+                            .get(Endpoint(a.url).resource("stream", v.type, id), true)
+                            .objects("streams")
+                            .mapNotNull { adapt(a, it, casting) }
+                    }
+                    .orEmpty()
+            if (links.isNotEmpty()) return links
+        }
+        return emptyList()
     }
 
     suspend fun subtitles(v: Video, links: List<Link>): List<Caption> {
@@ -191,7 +214,7 @@ internal class Playback(private val p: Profile, private val transport: Transport
         val independent =
             p.addons
                 .filter { it.uses("subtitles") }
-                .independent(45_000) { a ->
+                .independent(12_000) { a ->
                     val endpoint = Endpoint(a.url)
                     for (id in v.ids) {
                         val requests = mutableListOf(id to extras.toMap())

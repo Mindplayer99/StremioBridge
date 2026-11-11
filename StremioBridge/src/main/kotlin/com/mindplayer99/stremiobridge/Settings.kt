@@ -31,6 +31,8 @@ internal class Settings(
     private var original: Profile? = null
     private var draft = Profile()
     private val errors = mutableMapOf<String, String>()
+    private var editingAddonOrder = false
+    private var editingRowOrder = false
     private val roleNames =
         mapOf(
             "catalog" to "Browse & search",
@@ -211,6 +213,12 @@ internal class Settings(
             errors.clear()
             editor()
         }
+        ui.section(body, "Appearance")
+        ui.toggle(body, "AMOLED black", ui.amoled) {
+            ui.amoled = it
+            manager()
+        }
+        ui.note(body, "Settings only. Applies in CloudStream’s dark theme.")
         ui.button(ui.footer, "New profile", primary = true) {
             input("Profile name", action = "Create profile", back = ::manager) { value ->
                 original = null
@@ -291,17 +299,45 @@ internal class Settings(
         if (message != null) ui.note(body, message)
         if (draft.addons.isEmpty())
             ui.note(body, "Add a configured install link from your addon’s setup page.")
-        for (addon in draft.addons) {
+        for ((index, addon) in draft.addons.withIndex()) {
             val detail =
                 listOf(host(addon), summary(addon), errors[addon.key])
                     .filterNotNull()
                     .filter(String::isNotBlank)
                     .joinToString("\n")
-            ui.card(body, name(addon), detail) { addon(addon.key) }
+            val card = ui.card(body, name(addon), detail) { addon(addon.key) }
+            if (editingAddonOrder)
+                ui.orderControls(card, name(addon), index, draft.addons.size, addon.key) { target ->
+                    val scroll = ui.scrollPosition
+                    draft = draft.copy(addons = moved(draft.addons, index, target))
+                    addons()
+                    ui.restoreScroll(scroll)
+                }
         }
-        ui.button(ui.footer, "Add addons", primary = true) { addLinks() }
+        if (draft.addons.any { it.uses("stream") }) {
+            ui.section(body, "Player sources")
+            ui.toggle(body, "Group by addon · debrid first", draft.groupPlayback) {
+                draft = draft.copy(groupPlayback = it)
+            }
+            ui.note(
+                body,
+                "Uses addon order in the native player. Play mirror uses CloudStream’s resolution order. Quality profiles that hide low-priority sources keep their own ordering.",
+            )
+        }
+        ui.button(ui.footer, "Add addons", primary = !editingAddonOrder) { addLinks() }
+        if (draft.addons.size > 1)
+            ui.button(
+                ui.footer,
+                if (editingAddonOrder) "Done ordering" else "Edit order",
+                primary = editingAddonOrder,
+            ) {
+                val scroll = ui.scrollPosition
+                editingAddonOrder = !editingAddonOrder
+                addons()
+                ui.restoreScroll(scroll)
+            }
         if (draft.addons.isNotEmpty())
-            ui.button(ui.footer, "Refresh enabled manifests") {
+            ui.button(body, "Refresh enabled manifests") {
                 refreshManifests(draft.addons.filter { it.enabled }.map { it.key }.toSet()) {
                     addons(it)
                 }
@@ -508,8 +544,7 @@ internal class Settings(
         }
     }
 
-    private fun rowName(row: Row) =
-        row.title.ifBlank { catalogForRow(draft, row)?.name ?: row.catalog }
+    private fun rowName(row: Row) = rowTitle(draft, row)
 
     private fun rowSummary(row: Row): String {
         val addon = draft.addons.find { it.key == row.addon }
@@ -523,18 +558,34 @@ internal class Settings(
                 !c.accepts(c.firstArgs(row.args)) -> "Filters need attention"
                 else -> null
             }
-        return (listOfNotNull(addon?.let(::name), row.type, state) +
-                row.args.map { it.key + " · " + it.value })
-            .joinToString("\n")
+        return listOfNotNull(addon?.let(::name), state).joinToString(" · ")
     }
 
     private fun rows() {
         val body = ui.page("Home rows", { editor() })
         if (draft.rows.isEmpty()) ui.note(body, "Choose the catalogs you want on your Home screen.")
-        for ((index, row) in draft.rows.withIndex()) ui.card(body, rowName(row), rowSummary(row)) {
-            row(index)
+        for ((index, row) in draft.rows.withIndex()) {
+            val card = ui.card(body, rowName(row), rowSummary(row)) { row(index) }
+            if (editingRowOrder)
+                ui.orderControls(card, rowName(row), index, draft.rows.size, row.key) { target ->
+                    val scroll = ui.scrollPosition
+                    draft = draft.copy(rows = moved(draft.rows, index, target))
+                    rows()
+                    ui.restoreScroll(scroll)
+                }
         }
-        ui.button(ui.footer, "Choose catalogs", primary = true) { picker() }
+        ui.button(ui.footer, "Add catalogs", primary = !editingRowOrder) { picker() }
+        if (draft.rows.size > 1)
+            ui.button(
+                ui.footer,
+                if (editingRowOrder) "Done ordering" else "Edit order",
+                primary = editingRowOrder,
+            ) {
+                val scroll = ui.scrollPosition
+                editingRowOrder = !editingRowOrder
+                rows()
+                ui.restoreScroll(scroll)
+            }
     }
 
     private fun row(index: Int) {
@@ -604,10 +655,13 @@ internal class Settings(
                     addon.manifest!!
                         .catalogs
                         .filterNot { c -> c.extras.any { it.name == "search" && it.required } }
+                        .filterNot { c ->
+                            draft.rows.any { it.key == Row(addon.key, c.type, c.id).key }
+                        }
                         .map { addon to it }
                 }
         val selected = linkedSetOf<String>()
-        val body = ui.page("Choose catalogs", ::rows, scrolling = false)
+        val body = ui.page("Add catalogs", ::rows, scrolling = false)
         val filter =
             EditText(activity).apply {
                 hint = "Find a catalog"
@@ -618,7 +672,13 @@ internal class Settings(
         ui.styleList(list)
         body.addView(filter, LinearLayout.LayoutParams(-1, -2))
         body.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        if (choices.isEmpty()) ui.note(body, "Enable Browse & search on a catalog addon first.")
+        if (choices.isEmpty())
+            ui.note(
+                body,
+                if (draft.addons.any { it.uses("catalog") })
+                    "All available catalogs are on Home. Open a Home row to edit filters or add a filtered copy."
+                else "Enable Browse & search on a catalog addon first.",
+            )
         var visible = choices
         val add =
             ui.button(ui.footer, "Add selected", primary = true, enabled = false) {
@@ -644,7 +704,10 @@ internal class Settings(
                             draft.rows.any {
                                 it.addon == a.key && it.type == c.type && it.catalog == c.id
                             }
-                        c.name + "\n" + c.type + " · " + name(a) + if (onHome) " · On Home" else ""
+                        rowTitle(draft, Row(a.key, c.type, c.id)) +
+                            "\n" +
+                            name(a) +
+                            if (onHome) " · Filtered row on Home" else ""
                     }
                 )
             visible.forEachIndexed { i, (a, c) ->

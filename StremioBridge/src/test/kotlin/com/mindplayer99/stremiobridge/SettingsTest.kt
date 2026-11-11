@@ -150,7 +150,7 @@ class SettingsTest {
             screenshot("profile-compact", 700)
             assertControlVisible("Save changes")
             click("Home rows")
-            click("Choose catalogs")
+            click("Add catalogs")
             screenshot("catalog-picker-dark")
             screenshot("catalog-picker-compact", 700)
             assertControlVisible("Add selected")
@@ -216,7 +216,7 @@ class SettingsTest {
             click("Cinema")
             screenshot("profile-light")
             click("Home rows")
-            click("Popular")
+            click("Popular (Movies) · Horror")
             click("Edit filters")
             screenshot("filters-light")
             click("genre")
@@ -247,6 +247,51 @@ class SettingsTest {
             click("Back")
             click("Discard")
             assertTrue(store.all().single().addons.single().enabled)
+        }
+    }
+
+    @Test
+    fun inlineOrderingEditsDraftsAndRequiresSave() {
+        val a = addon("First")
+        val b = addon("Second")
+        val first = Row(a.key, "movie", "popular", title = "First row")
+        val second = Row(a.key, "series", "series", title = "Second row")
+        val profile =
+            Profile(
+                name = "Cinema",
+                addons = listOf(a, b),
+                rows = listOf(first, second),
+                initialized = true,
+            )
+        withSettings(profile) { store ->
+            click("Cinema")
+            click("Addons")
+            click("Edit order")
+            val arrows =
+                views().filter {
+                    it.contentDescription?.toString()?.startsWith("Move Fixture") == true
+                }
+            assertEquals(4, arrows.size)
+            assertFalse(
+                arrows.single { it.contentDescription == "Move Fixture First up" }.isEnabled
+            )
+            arrows.single { it.contentDescription == "Move Fixture Second up" }.performClick()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf(a.key, b.key), store.all().single().addons.map { it.key })
+            screenshot("addon-inline-order")
+            click("Back")
+            click("Home rows")
+            click("Edit order")
+            views().single { it.contentDescription == "Move Second row up" }.performClick()
+            shadowOf(Looper.getMainLooper()).idle()
+            screenshot("rows-inline-order")
+            assertEquals(listOf(first, second), store.all().single().rows)
+            click("Done ordering")
+            click("Back")
+            click("Save changes")
+            awaitSaved { store.all().single().rows.first() == second }
+            assertEquals(listOf(b.key, a.key), store.all().single().addons.map { it.key })
+            assertEquals(listOf(second, first), store.all().single().rows)
         }
     }
 

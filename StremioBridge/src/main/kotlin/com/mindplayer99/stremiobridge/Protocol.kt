@@ -228,6 +228,7 @@ internal data class Profile(
     val rows: List<Row> = emptyList(),
     val preferred: String? = null,
     val initialized: Boolean = false,
+    val groupPlayback: Boolean = true,
 ) {
     fun catalog(r: Row) =
         addons

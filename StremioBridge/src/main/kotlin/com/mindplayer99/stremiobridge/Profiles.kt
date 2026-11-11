@@ -14,6 +14,7 @@ internal fun profileJson(p: Profile) =
         put("name", p.name)
         put("preferred", p.preferred)
         put("initialized", p.initialized)
+        put("groupPlayback", p.groupPlayback)
         put(
             "addons",
             JSONArray(
@@ -70,6 +71,7 @@ internal fun readProfile(j: JSONObject) =
         },
         j.str("preferred"),
         j.optBoolean("initialized"),
+        j.optBoolean("groupPlayback", true),
     )
 
 internal suspend fun refresh(draft: Profile, transport: Transport, force: Boolean): Profile =

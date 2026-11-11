@@ -24,7 +24,9 @@ class StremioBridgePlugin : Plugin() {
             if (activity != null)
                 activity.runOnUiThread {
                     Settings(activity, store) { old, new ->
-                            register(store.replace(old, new))
+                            val saved = store.replace(old, new)
+                            old?.let(NativeSources::clear)
+                            register(saved)
                             if (old != null && new == null) refs.drop(old.key)
                             afterPluginsLoadedEvent.invoke(true)
                         }

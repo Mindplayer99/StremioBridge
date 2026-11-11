@@ -1,8 +1,9 @@
 package com.mindplayer99.stremiobridge
 
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 internal data class Tile(val origin: String, val type: String, val meta: JSONObject) {
@@ -130,45 +131,93 @@ internal fun identities(meta: JSONObject): List<String> {
 
 internal data class Detail(val addon: String, val requested: String, val meta: JSONObject)
 
-internal class Metadata(private val profile: Profile, private val transport: Transport) {
+internal class Metadata(
+    private val profile: Profile,
+    private val transport: Transport,
+    private val preferredGraceMs: Long = 8_000,
+    private val deadlineMs: Long = 30_000,
+) {
     private val cache = Cache<JSONObject>(80, 240_000)
 
-    suspend fun resolve(tile: Tile): Detail {
+    suspend fun resolve(tile: Tile): Detail = coroutineScope {
         val preview = Detail(tile.origin, tile.id, tile.meta)
         var fallback = preview
-        return withTimeoutOrNull(100_000) {
-            for (a in
-                profile.addons
-                    .filter { it.uses("meta") }
-                    .sortedBy { it.key != profile.preferred }) {
-                for (id in identities(tile.meta)) {
-                    if (!a.manifest!!.accepts("meta", tile.type, id)) continue
-                    val url = Endpoint(a.url).resource("meta", tile.type, id)
-                    val j =
-                        attempt {
-                            cache.read(url) {
-                                transport.get(url, false).getJSONObject("meta").apply {
-                                    objects("videos").forEach { v ->
-                                        if (v.objects("streams").isNotEmpty())
-                                            v.put("_inline", true)
-                                        v.remove("streams")
+        val candidates =
+            profile.addons.filter { it.uses("meta") }.sortedBy { it.key != profile.preferred }
+        if (candidates.isEmpty()) return@coroutineScope preview
+        data class Result(val index: Int, val detail: Detail?)
+        val ready = Channel<Result>(Channel.UNLIMITED)
+        val jobs =
+            candidates.mapIndexed { index, a ->
+                launch {
+                    var result: Detail? = null
+                    withTimeoutOrNull(deadlineMs - 1) {
+                        for (id in identities(tile.meta)) {
+                            if (!a.manifest!!.accepts("meta", tile.type, id)) continue
+                            val url = Endpoint(a.url).resource("meta", tile.type, id)
+                            val j =
+                                attempt {
+                                    cache.read(url) {
+                                        transport.get(url, false).getJSONObject("meta").apply {
+                                            objects("videos").forEach { v ->
+                                                if (v.objects("streams").isNotEmpty())
+                                                    v.put("_inline", true)
+                                                v.remove("streams")
+                                            }
+                                        }
                                     }
-                                }
+                                } ?: continue
+                            if (
+                                id !in identities(j) ||
+                                    j.str("type")?.let { it != tile.type } == true
+                            )
+                                continue
+                            val found = Detail(a.key, id, j)
+                            if (
+                                tile.type in listOf("series", "anime", "anime.series", "channel") &&
+                                    j.objects("videos").none { it.str("id") != null }
+                            ) {
+                                if (result == null) result = found
+                            } else {
+                                result = found
+                                break
                             }
-                        } ?: continue
-                    if (id !in identities(j) || j.str("type")?.let { it != tile.type } == true)
-                        continue
-                    val result = Detail(a.key, id, j)
-                    if (
-                        tile.type in listOf("series", "anime", "anime.series", "channel") &&
-                            j.objects("videos").none { it.str("id") != null }
-                    ) {
-                        if (fallback === preview && tile.meta.objects("videos").isEmpty())
-                            fallback = result
-                    } else return@withTimeoutOrNull result
+                        }
+                    }
+                    ready.send(Result(index, result))
                 }
             }
-            fallback
-        } ?: fallback
+        val started = now()
+        val complete = sortedMapOf<Int, Detail>()
+        var primaryDone = false
+        var remaining = jobs.size
+        fun hasEpisodes(detail: Detail) =
+            tile.type !in listOf("series", "anime", "anime.series", "channel") ||
+                detail.meta.objects("videos").any { it.str("id") != null }
+        try {
+            withTimeoutOrNull(deadlineMs) {
+                while (remaining > 0) {
+                    val grace = preferredGraceMs - (now() - started)
+                    if (complete.isNotEmpty() && (primaryDone || grace <= 0))
+                        return@withTimeoutOrNull complete.values.first()
+                    val event =
+                        if (complete.isNotEmpty())
+                            withTimeoutOrNull(grace.coerceAtLeast(1)) { ready.receive() }
+                        else ready.receive()
+                    if (event == null) return@withTimeoutOrNull complete.values.first()
+                    remaining--
+                    if (event.index == 0) primaryDone = true
+                    event.detail?.let { detail ->
+                        if (hasEpisodes(detail)) complete[event.index] = detail
+                        else if (fallback === preview && tile.meta.objects("videos").isEmpty())
+                            fallback = detail
+                    }
+                }
+                complete.values.firstOrNull() ?: fallback
+            } ?: complete.values.firstOrNull() ?: fallback
+        } finally {
+            jobs.forEach { it.cancel() }
+            ready.close()
+        }
     }
 }

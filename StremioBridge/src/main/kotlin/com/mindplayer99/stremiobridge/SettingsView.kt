@@ -36,7 +36,7 @@ import kotlin.math.pow
 
 /** Tonal roles use the host palette; text is adjusted only when its contrast needs it. */
 internal class SettingsPalette(val surface: Int, text: Int, val accent: Int, error: Int) {
-    val row = mix(surface, text, .045f)
+    val row = mix(surface, text, .09f)
     val selected = mix(row, accent, .10f)
     val pressed = mix(row, text, .08f)
     private val surfaces = listOf(surface, row, selected, pressed)
@@ -91,19 +91,45 @@ internal class SettingsPalette(val surface: Int, text: Int, val accent: Int, err
 /** Native Views only: no assumptions about the host's Material or Compose classpath. */
 internal class SettingsView(private val activity: Activity, onClose: () -> Unit) {
     val dialog = Dialog(activity)
-    internal val palette =
-        SettingsPalette(
+    private val appearance = activity.getSharedPreferences("stremiobridge-ui", 0)
+    var amoled: Boolean
+        get() = appearance.getBoolean("amoled", false)
+        set(value) {
+            appearance.edit().putBoolean("amoled", value).apply()
+            palette = makePalette()
+            root.background = shape(palette.surface, radius = 16)
+        }
+
+    private fun makePalette(): SettingsPalette {
+        val background =
             hostColor(
                 "primaryGrayBackground",
                 color(android.R.attr.colorBackground, Color.rgb(24, 24, 28)),
-            ),
+            )
+        val dark =
+            SettingsPalette.contrast(background, Color.WHITE) >
+                SettingsPalette.contrast(background, Color.BLACK)
+        return SettingsPalette(
+            if (amoled && dark) Color.BLACK else background,
             hostColor("textColor", color(android.R.attr.textColorPrimary, Color.WHITE)),
             hostColor("colorAccent", color(android.R.attr.colorAccent, Color.rgb(98, 91, 210))),
             hostColor("colorError", Color.rgb(186, 54, 48)),
         )
+    }
+
+    internal var palette = makePalette()
+        private set
+
     private val root = column()
     val footer = column().apply { setPadding(0, dp(8), 0, 0) }
     private var backAction: (() -> Unit)? = null
+    private var scroller: ScrollView? = null
+    val scrollPosition
+        get() = scroller?.scrollY ?: 0
+
+    fun restoreScroll(position: Int) {
+        scroller?.let { it.post { it.scrollTo(0, position) } }
+    }
 
     init {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -197,6 +223,7 @@ internal class SettingsView(private val activity: Activity, onClose: () -> Unit)
     ): LinearLayout {
         backAction = back
         root.removeAllViews()
+        scroller = null
         footer.removeAllViews()
         val header =
             LinearLayout(activity).apply {
@@ -271,6 +298,7 @@ internal class SettingsView(private val activity: Activity, onClose: () -> Unit)
                         addView(body)
                     }
             root.addView(scroll, LinearLayout.LayoutParams(-1, -2, 1f))
+            scroller = scroll
         } else {
             root.addView(body, LinearLayout.LayoutParams(-1, -2, 1f))
         }
@@ -420,6 +448,46 @@ internal class SettingsView(private val activity: Activity, onClose: () -> Unit)
             setTextColor(textColors(if (primary) palette.onAccent else palette.ink))
             background = interactive(if (primary) palette.accent else fill, primary)
         }
+
+    fun orderControls(
+        row: LinearLayout,
+        title: String,
+        index: Int,
+        count: Int,
+        identity: String = title,
+        move: (Int) -> Unit,
+    ) {
+        row.removeViewAt(row.childCount - 1)
+        val controls = column()
+        for ((symbol, delta, direction) in listOf(Triple("↑", -1, "up"), Triple("↓", 1, "down"))) {
+            controls.addView(
+                actionButton(symbol).apply {
+                    minWidth = dp(48)
+                    textSize = 22f
+                    setPadding(0, dp(8), 0, dp(8))
+                    contentDescription = "Move $title $direction"
+                    tag = "order:$identity:$direction"
+                    isEnabled = index + delta in 0 until count
+                    setOnClickListener {
+                        val focused = isFocused && !isInTouchMode
+                        move(index + delta)
+                        if (focused)
+                            root.post {
+                                val preferred =
+                                    root.findViewWithTag<View>("order:$identity:$direction")
+                                val alternate =
+                                    root.findViewWithTag<View>(
+                                        "order:$identity:${if (direction == "up") "down" else "up"}"
+                                    )
+                                (preferred?.takeIf { it.isEnabled } ?: alternate)?.requestFocus()
+                            }
+                    }
+                },
+                LinearLayout.LayoutParams(dp(48), dp(48)),
+            )
+        }
+        row.addView(controls, LinearLayout.LayoutParams(dp(48), -2).apply { marginStart = dp(8) })
+    }
 
     fun button(
         parent: LinearLayout,
