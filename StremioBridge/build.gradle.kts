@@ -1,4 +1,4 @@
-version = 2
+version = 3
 cloudstream {
     language = "en"
     description = "Browse Stremio catalogs, combine metadata and play addon-resolved media in CloudStream."

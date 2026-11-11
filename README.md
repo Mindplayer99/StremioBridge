@@ -1,6 +1,8 @@
-# StremioBridge v2
+# StremioBridge v3
 
 StremioBridge adds one native CloudStream provider per profile. Browse catalogs from Xperience or AIOMetadata, open details from a preferred metadata addon, and pass playback links from AIOStreams to the CloudStream player. TorBox stays configured in AIOStreams. A combined addon can supply several resources.
+
+Version 3 refines only the settings presentation: compact tonal rows, host-aware light/dark colors, readable contrast, single-choice selection indicators, restrained action emphasis, consistent fields and dialogs, and wrapping catalog checkbox rows. Controls, navigation, profile data, and save/refresh behavior are unchanged. It uses native Android Views without additional dependencies.
 
 ## Install on Android
 
@@ -72,6 +74,6 @@ For another device-accessible host, run `python3 scripts/package_release.py --ba
 
 ## Validation
 
-All 19 automated tests passed for this build. The release checks include the existing protocol and playback fixtures plus settings tests for offline saves, batch selection, filter editing and repair, role preservation, discarded drafts and partial refresh failures. The settings are rendered for visual review in light and dark Android themes, with compact-window checks for visible action buttons. The protocol suite exercises URL encoding and redirects, resource routing, partial failures, pagination, movie and episode identities, headers, ordering, subtitle scoping, encrypted backup/restore and native settings. A Robolectric journey runs the published CloudStream Home, search, detail and link APIs against local synthetic addons on simulated Android 14. The compiled extension was also checked against the official Blue stable 4.9.1 APK for the host APIs it references. Device installation, media decoding, casting, downloading and real account playback require on-device verification.
+All 24 automated tests passed for this build. These include the existing 19 protocol, provider, and settings tests, plus five visual regression journeys covering light/dark themes, 320dp phones, landscape, long labels, empty lists, multiple profiles, selected and disabled states, native Back, focus, scrolling, validation, dialog actions, draft preservation, and simulated keyboard resize. Native Android rendering is visually reviewed. Palette tests check text contrast of at least 4.5:1 across normal and interactive surfaces, including colors extracted from the CloudStream APK. The compiled extension is checked against the official Blue stable 4.9.1 and Red pre-release APKs for its referenced host APIs. Real keyboard behavior, device installation, media decoding, casting, downloading and account playback require on-device verification.
 
 References include the [Stremio manifest rules](https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/manifest.md), [subtitle request specification](https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/requests/defineSubtitlesHandler.md), [AIOStreams](https://docs.aiostreams.viren070.me/), [AIOMetadata](https://github.com/cedya77/aiometadata/tree/dev) and the [Xperience guide](https://xperience-app.com/guide).

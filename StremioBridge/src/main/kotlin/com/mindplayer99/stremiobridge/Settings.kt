@@ -12,7 +12,6 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.text.method.PasswordTransformationMethod
-import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -78,17 +77,18 @@ internal class Settings(
     ) {
         var job: Job? = null
         val progress =
-            AlertDialog.Builder(activity)
-                .setMessage(title)
-                .setNegativeButton("Cancel") { _, _ ->
-                    job?.cancel()
-                    if (alive()) back()
-                }
-                .setOnCancelListener {
-                    job?.cancel()
-                    if (alive()) back()
-                }
-                .show()
+            ui.alert(
+                AlertDialog.Builder(activity)
+                    .setView(ui.loading(title))
+                    .setNegativeButton("Cancel") { _, _ ->
+                        job?.cancel()
+                        if (alive()) back()
+                    }
+                    .setOnCancelListener {
+                        job?.cancel()
+                        if (alive()) back()
+                    }
+            )
         job =
             scope.launch {
                 try {
@@ -103,30 +103,34 @@ internal class Settings(
                 } catch (e: NeedsConfiguration) {
                     if (alive()) {
                         progress.dismiss()
-                        AlertDialog.Builder(activity)
-                            .setTitle("Finish addon setup")
-                            .setMessage(
-                                "Configure the addon in your browser, then paste its final install link."
-                            )
-                            .setPositiveButton("Open setup") { _, _ ->
-                                openBrowser(e.page)
-                                back()
-                            }
-                            .setNegativeButton("Back") { _, _ -> back() }
-                            .setOnCancelListener { back() }
-                            .show()
+                        ui.alert(
+                            AlertDialog.Builder(activity)
+                                .setTitle("Finish addon setup")
+                                .setMessage(
+                                    "Configure the addon in your browser, then paste its final install link."
+                                )
+                                .setPositiveButton("Open setup") { _, _ ->
+                                    openBrowser(e.page)
+                                    back()
+                                }
+                                .setNegativeButton("Back") { _, _ -> back() }
+                                .setOnCancelListener { back() }
+                        )
                     }
                 } catch (e: Exception) {
                     if (alive()) {
                         progress.dismiss()
                         back()
-                        AlertDialog.Builder(activity)
-                            .setTitle("Could not finish")
-                            .setMessage(
-                                (e as? BridgeFailure)?.message ?: "Check the input and try again."
-                            )
-                            .setPositiveButton("OK", null)
-                            .show()
+                        ui.alert(
+                            AlertDialog.Builder(activity)
+                                .setTitle("Could not finish")
+                                .setMessage(
+                                    (e as? BridgeFailure)?.message
+                                        ?: "Check the input and try again."
+                                )
+                                .setPositiveButton("OK", null),
+                            error = true,
+                        )
                     }
                 } finally {
                     progress.dismiss()
@@ -162,6 +166,7 @@ internal class Settings(
                 setText(value)
                 setSelection(length())
             }
+        ui.styleField(field)
         body.addView(field, LinearLayout.LayoutParams(-1, -2))
         if (secret)
             ui.toggle(
@@ -257,12 +262,13 @@ internal class Settings(
             manager()
             return
         }
-        AlertDialog.Builder(activity)
-            .setTitle("Save your changes?")
-            .setPositiveButton("Save") { _, _ -> save() }
-            .setNegativeButton("Discard") { _, _ -> manager() }
-            .setNeutralButton("Keep editing") { _, _ -> editor() }
-            .show()
+        ui.alert(
+            AlertDialog.Builder(activity)
+                .setTitle("Save your changes?")
+                .setPositiveButton("Save") { _, _ -> save() }
+                .setNegativeButton("Discard") { _, _ -> manager() }
+                .setNeutralButton("Keep editing") { _, _ -> editor() }
+        )
     }
 
     private fun save() {
@@ -385,8 +391,9 @@ internal class Settings(
             item.checked
                 .takeIf { it > 0 }
                 ?.let { DateFormat.getDateTimeInstance().format(Date(it)) } ?: "Never"
+        ui.divider(body)
         ui.note(body, "Manifest last fetched\n" + checked)
-        errors[key]?.let { ui.note(body, it) }
+        errors[key]?.let { ui.error(body, it) }
         ui.button(body, "Refresh manifest") { refreshManifests(setOf(key)) { addon(key) } }
         if (item.manifest?.configurable == true) {
             ui.button(body, "Open addon settings") { openBrowser(Endpoint(item.url).configure()) }
@@ -436,21 +443,24 @@ internal class Settings(
             }
         }
         if (draft.addons.size > 1) ui.button(body, "Change addon order") { orderAddon(key) }
-        ui.button(body, "Remove addon") {
-            AlertDialog.Builder(activity)
-                .setMessage("Remove " + name(item) + " and its Home rows from this profile?")
-                .setPositiveButton("Remove") { _, _ ->
-                    draft =
-                        draft.copy(
-                            addons = draft.addons.filterNot { it.key == key },
-                            rows = draft.rows.filterNot { it.addon == key },
-                            preferred = draft.preferred?.takeUnless { it == key },
-                        )
-                    errors.remove(key)
-                    addons()
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
+        ui.divider(body)
+        ui.button(body, "Remove addon", destructive = true) {
+            ui.alert(
+                AlertDialog.Builder(activity)
+                    .setMessage("Remove " + name(item) + " and its Home rows from this profile?")
+                    .setPositiveButton("Remove") { _, _ ->
+                        draft =
+                            draft.copy(
+                                addons = draft.addons.filterNot { it.key == key },
+                                rows = draft.rows.filterNot { it.addon == key },
+                                preferred = draft.preferred?.takeUnless { it == key },
+                            )
+                        errors.remove(key)
+                        addons()
+                    }
+                    .setNegativeButton("Cancel", null),
+                destructive = true,
+            )
         }
     }
 
@@ -479,7 +489,7 @@ internal class Settings(
             body,
             "Provides descriptions, artwork and episodes. Compatible addons supply fallback when needed.",
         )
-        ui.card(body, "Follow addon order", if (draft.preferred == null) "Selected" else null) {
+        ui.choice(body, "Follow addon order", selected = draft.preferred == null) {
             draft = draft.copy(preferred = null)
             metadata()
         }
@@ -487,10 +497,11 @@ internal class Settings(
             draft.addons.filter { it.uses("meta") && "meta" in it.manifest!!.capabilities }
         if (eligible.isEmpty())
             ui.note(body, "Enable Details & episodes on an addon that provides metadata.")
-        for (addon in eligible) ui.card(
+        for (addon in eligible) ui.choice(
             body,
             name(addon),
-            if (draft.preferred == addon.key) "Selected" else host(addon),
+            host(addon),
+            selected = draft.preferred == addon.key,
         ) {
             draft = draft.copy(preferred = addon.key)
             metadata()
@@ -578,7 +589,8 @@ internal class Settings(
                 draft = draft.copy(rows = moved(draft.rows, index, target))
                 rows()
             }
-        ui.button(body, "Remove from Home") {
+        ui.divider(body)
+        ui.button(body, "Remove from Home", destructive = true) {
             draft = draft.copy(rows = draft.rows.filterIndexed { i, _ -> i != index })
             rows()
         }
@@ -602,6 +614,8 @@ internal class Settings(
                 setSingleLine()
             }
         val list = ListView(activity).apply { choiceMode = ListView.CHOICE_MODE_MULTIPLE }
+        ui.styleField(filter)
+        ui.styleList(list)
         body.addView(filter, LinearLayout.LayoutParams(-1, -2))
         body.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
         if (choices.isEmpty()) ui.note(body, "Enable Browse & search on a catalog addon first.")
@@ -617,7 +631,6 @@ internal class Settings(
         fun updateButton() {
             add.text = "Add " + selected.size + " rows"
             add.isEnabled = selected.isNotEmpty()
-            add.alpha = if (add.isEnabled) 1f else .45f
         }
         fun show(query: String) {
             visible =
@@ -625,16 +638,14 @@ internal class Settings(
                     (c.name + " " + c.type + " " + name(a)).contains(query, true)
                 }
             list.adapter =
-                ArrayAdapter(
-                    activity,
-                    android.R.layout.simple_list_item_multiple_choice,
+                ui.catalogAdapter(
                     visible.map { (a, c) ->
                         val onHome =
                             draft.rows.any {
                                 it.addon == a.key && it.type == c.type && it.catalog == c.id
                             }
                         c.name + "\n" + c.type + " · " + name(a) + if (onHome) " · On Home" else ""
-                    },
+                    }
                 )
             visible.forEachIndexed { i, (a, c) ->
                 list.setItemChecked(i, Row(a.key, c.type, c.id).key in selected)
@@ -730,7 +741,7 @@ internal class Settings(
         }
         val body = ui.page(extra.name, returnTo)
         if (!extra.required)
-            ui.card(body, "Any", if (extra.name !in item.args) "Selected" else null) { apply(null) }
+            ui.choice(body, "Any", selected = extra.name !in item.args) { apply(null) }
         if (extra.options.isEmpty()) {
             ui.button(body, "Enter value") {
                 input(
@@ -743,10 +754,10 @@ internal class Settings(
                 }
             }
         } else
-            for (option in extra.options) ui.card(
+            for (option in extra.options) ui.choice(
                 body,
                 option,
-                if (item.args[extra.name] == option) "Selected" else null,
+                selected = item.args[extra.name] == option,
             ) {
                 apply(option)
             }
@@ -769,19 +780,22 @@ internal class Settings(
         ui.card(body, "Export encrypted backup", "Includes addon links, roles and Home rows") {
             export()
         }
-        ui.card(body, "Delete profile", "Removes its setup and saved item references") {
-            AlertDialog.Builder(activity)
-                .setMessage("Delete " + draft.name + " and its bridge references?")
-                .setPositiveButton("Delete") { _, _ ->
-                    try {
-                        original?.let { commit(it, null) }
-                        manager()
-                    } catch (e: Exception) {
-                        toast((e as? BridgeFailure)?.message ?: "Could not delete profile.")
+        ui.divider(body)
+        ui.danger(body, "Delete profile", "Removes its setup and saved item references") {
+            ui.alert(
+                AlertDialog.Builder(activity)
+                    .setMessage("Delete " + draft.name + " and its bridge references?")
+                    .setPositiveButton("Delete") { _, _ ->
+                        try {
+                            original?.let { commit(it, null) }
+                            manager()
+                        } catch (e: Exception) {
+                            toast((e as? BridgeFailure)?.message ?: "Could not delete profile.")
+                        }
                     }
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
+                    .setNegativeButton("Cancel", null),
+                destructive = true,
+            )
         }
     }
 
@@ -809,6 +823,7 @@ internal class Settings(
                         keyListener = null
                         setTextIsSelectable(true)
                     }
+                ui.styleField(text)
                 body.addView(text, LinearLayout.LayoutParams(-1, -2))
                 ui.button(ui.footer, "Copy encrypted backup", primary = true) {
                     (activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
