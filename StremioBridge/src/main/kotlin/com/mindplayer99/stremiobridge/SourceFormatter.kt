@@ -99,8 +99,11 @@ internal fun cacheStatus(stream: JSONObject): CacheStatus {
     return CacheStatus.UNKNOWN
 }
 
-private val placeholder = Regex("\\{([A-Za-z][A-Za-z0-9]*)}")
-private val optional = Regex("\\[([^\\[\\]]*\\{[A-Za-z][A-Za-z0-9]*}[^\\[\\]]*)]")
+// Android uses ICU, which requires these literal closing delimiters to be escaped.
+// Defer compilation so a template-parser fault cannot poison this entire file's class initializer
+// (including originalSourceText, which is used even with the bridge formatter switched off).
+private val placeholder by lazy { Regex("\\{([A-Za-z][A-Za-z0-9]*)\\}") }
+private val optional by lazy { Regex("\\[([^\\[\\]]*\\{[A-Za-z][A-Za-z0-9]*\\}[^\\[\\]]*)\\]") }
 
 internal fun validateFormatter(name: String, details: String) {
     if (name.isBlank()) throw BridgeFailure("Enter a name template.")

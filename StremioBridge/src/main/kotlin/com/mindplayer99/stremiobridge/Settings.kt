@@ -609,9 +609,13 @@ internal class Settings(
                         sample,
                         2160,
                     )
-            } catch (e: BridgeFailure) {
-                heading.error = e.message
-                preview.text = e.message
+            } catch (e: Exception) {
+                val message =
+                    if (e is BridgeFailure) e.message
+                    else
+                        "Could not preview this formatter. Reset the preset or keep original formatting."
+                heading.error = message
+                preview.text = message
             }
         }
         val watcher =
@@ -647,8 +651,11 @@ internal class Settings(
                     ),
                 )
                 addon(key)
-            } catch (e: BridgeFailure) {
-                heading.error = e.message
+            } catch (e: Exception) {
+                heading.error =
+                    if (e is BridgeFailure) e.message
+                    else
+                        "Could not apply this formatter. Reset the preset or keep original formatting."
             }
         }
     }
