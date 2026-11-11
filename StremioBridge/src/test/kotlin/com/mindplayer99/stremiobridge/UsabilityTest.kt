@@ -62,11 +62,11 @@ class UsabilityTest {
             )
         val result = adapt(addon("aiostream", "Mechfire"), stream, false)!!
         assertTrue(result.debrid)
-        assertTrue(result.label.contains("Cached"))
+        assertFalse(result.label.contains("Cached"))
         assertTrue(
             isDebridStream(JSONObject("""{"streamData":{"type":"debrid","service":{"id":"tb"}}}"""))
         )
-        assertFalse(
+        assertTrue(
             isDebridStream(
                 JSONObject(
                     """{"name":"TorBox compatible HTTP provider","streamData":{"type":"http"}}"""
@@ -74,10 +74,10 @@ class UsabilityTest {
             )
         )
         assertEquals(2160, result.quality)
-        assertEquals(2, result.label.lines().size)
+        assertEquals(originalSourceText(stream, ""), result.label)
         assertTrue(result.label.contains("TorBox"))
         assertTrue(result.label.contains("HIN"))
-        assertTrue(result.label.length <= 209)
+        assertFalse(addon("aiostream").formatter.enabled)
         assertEquals("https://player.example/", result.headers["Referer"])
         assertNull(adapt(addon("http"), stream, true))
         for (provider in listOf("PenguPlay", "HdHub", "111477")) {

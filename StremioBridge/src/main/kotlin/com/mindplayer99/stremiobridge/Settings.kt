@@ -20,6 +20,7 @@ import java.net.URI
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.*
+import org.json.JSONObject
 
 internal class Settings(
     private val activity: Activity,
@@ -242,7 +243,12 @@ internal class Settings(
                 " enabled",
             ::addons,
         )
-        ui.card(body, "Home rows", draft.rows.size.toString() + " selected", ::rows)
+        ui.card(
+            body,
+            "Home rows",
+            draft.visibleRows().size.toString() + " shown · " + draft.rows.size + " total",
+            ::rows,
+        )
         val preferred =
             draft.addons.find {
                 it.key == draft.preferred && it.uses("meta") && "meta" in it.manifest!!.capabilities
@@ -299,21 +305,20 @@ internal class Settings(
         if (message != null) ui.note(body, message)
         if (draft.addons.isEmpty())
             ui.note(body, "Add a configured install link from your addon’s setup page.")
-        for ((index, addon) in draft.addons.withIndex()) {
+        val items = ui.column().also { body.addView(it) }
+        for (addon in draft.addons) {
             val detail =
                 listOf(host(addon), summary(addon), errors[addon.key])
                     .filterNotNull()
                     .filter(String::isNotBlank)
                     .joinToString("\n")
-            val card = ui.card(body, name(addon), detail) { addon(addon.key) }
+            val card = ui.card(items, name(addon), detail) { addon(addon.key) }
             if (editingAddonOrder)
-                ui.orderControls(card, name(addon), index, draft.addons.size, addon.key) { target ->
-                    val scroll = ui.scrollPosition
+                ui.orderControls(card, name(addon), addon.key) { index, target ->
                     draft = draft.copy(addons = moved(draft.addons, index, target))
-                    addons()
-                    ui.restoreScroll(scroll)
                 }
         }
+        if (editingAddonOrder) ui.updateOrderControls(items)
         if (draft.addons.any { it.uses("stream") }) {
             ui.section(body, "Player sources")
             ui.toggle(body, "Group by addon · debrid first", draft.groupPlayback) {
@@ -377,7 +382,11 @@ internal class Settings(
                 { refresh(draft.copy(addons = draft.addons + added), Http, false) },
             ) {
                 draft = it
-                addons("Added " + added.size + " addons. Choose visible catalogs under Home rows.")
+                addons(
+                    "Added " +
+                        added.size +
+                        " addons. Catalog rows were added under Home rows; turn off any you don’t want."
+                )
             }
         }
     }
@@ -423,6 +432,15 @@ internal class Settings(
                 ),
             )
         }
+        if ("stream" in available) {
+            ui.section(body, "Source formatting")
+            ui.toggle(body, "Use bridge formatter", item.formatter.enabled) { on ->
+                val current = draft.addons.first { it.key == key }
+                replaceAddon(key, current.copy(formatter = current.formatter.copy(enabled = on)))
+            }
+            ui.note(body, "Off preserves the addon’s original icons, text and line breaks.")
+            ui.button(body, "Edit bridge formatter") { formatter(key) }
+        }
         val checked =
             item.checked
                 .takeIf { it > 0 }
@@ -465,6 +483,7 @@ internal class Settings(
                     { Manifest.discover(Http.get(endpoint.manifest, false), endpoint) },
                 ) { manifest ->
                     val current = draft.addons.first { it.key == key }
+                    val before = draft
                     replaceAddon(
                         key,
                         current.copy(
@@ -473,12 +492,12 @@ internal class Settings(
                             checked = System.currentTimeMillis(),
                         ),
                     )
+                    draft = addNewCatalogRows(before, draft)
                     errors.remove(key)
                     addon(key)
                 }
             }
         }
-        if (draft.addons.size > 1) ui.button(body, "Change addon order") { orderAddon(key) }
         ui.divider(body)
         ui.button(body, "Remove addon", destructive = true) {
             ui.alert(
@@ -497,25 +516,6 @@ internal class Settings(
                     .setNegativeButton("Cancel", null),
                 destructive = true,
             )
-        }
-    }
-
-    private fun orderAddon(key: String) {
-        val index = draft.addons.indexOfFirst { it.key == key }
-        val body = ui.page("Addon order", { addon(key) })
-        ui.note(
-            body,
-            "Used for metadata fallback and result collection. CloudStream applies its playback source priorities afterward.",
-        )
-        for ((label, target) in
-            listOf(
-                "Move up" to index - 1,
-                "Move down" to index + 1,
-                "Move to top" to 0,
-                "Move to bottom" to draft.addons.lastIndex,
-            )) ui.button(body, label, enabled = target in draft.addons.indices && target != index) {
-            draft = draft.copy(addons = moved(draft.addons, index, target))
-            addon(key)
         }
     }
 
@@ -544,6 +544,115 @@ internal class Settings(
         }
     }
 
+    private fun formatter(key: String) {
+        val item = draft.addons.firstOrNull { it.key == key } ?: return addons()
+        val body = ui.page("Source formatter", { addon(key) })
+        ui.note(
+            body,
+            name(item) + " · Changes apply only to this addon when Use bridge formatter is on.",
+        )
+        fun field(label: String, value: String, multiline: Boolean): EditText {
+            ui.section(body, label)
+            return EditText(activity).apply {
+                tag = "formatter-$label"
+                setText(value)
+                inputType =
+                    InputType.TYPE_CLASS_TEXT or
+                        if (multiline) InputType.TYPE_TEXT_FLAG_MULTI_LINE else 0
+                setSingleLine(!multiline)
+                if (multiline) {
+                    minLines = 3
+                    gravity = android.view.Gravity.TOP
+                }
+                ui.styleField(this)
+                body.addView(this, LinearLayout.LayoutParams(-1, -2))
+            }
+        }
+        val heading = field("Name template", item.formatter.name, true)
+        val details = field("Details template", item.formatter.details, true)
+        ui.note(
+            body,
+            "Insert {field}. Optional blocks such as [♬ {audio}] disappear when their fields are missing. Empty lines are omitted.",
+        )
+        ui.card(body, "Available fields", "Tap to see supported fields") {
+            ui.alert(
+                AlertDialog.Builder(activity)
+                    .setTitle("Formatter fields")
+                    .setMessage(SourceFormatter.tokens.joinToString(" · ") { "{$it}" })
+                    .setPositiveButton("OK", null)
+            )
+        }
+        ui.button(body, "Reset to default preset") {
+            heading.setText(SourceFormatter.DEFAULT_NAME)
+            details.setText(SourceFormatter.DEFAULT_DETAILS)
+        }
+        ui.section(body, "Example preview")
+        val preview = ui.text("", 14f).also { body.addView(it) }
+        val sample =
+            JSONObject(
+                """{"name":"▣ 4K ⚡ · REMUX · HEVC · DV","description":"≋ 78 Mbps │ ♬ DTS-HD MA · ♯ 5.1\n◉ EN │ 💬 SUB EN\n☁ TorBox · Example provider","url":"https://example.invalid/video.mkv","behaviorHints":{"filename":"Example.2160p.REMUX.HEVC.DV.mkv","videoSize":69700000000},"streamData":{"type":"debrid","service":{"id":"torbox","cached":true},"indexer":"Example provider","parsedFile":{"resolution":"2160p","quality":"REMUX","encode":"HEVC","audioTags":["DTS-HD MA"],"audioChannels":["5.1"],"languages":["en"],"subtitles":["en"],"visualTags":["DV"]},"bitrate":78000000}}"""
+            )
+        fun updatePreview() {
+            try {
+                validateFormatter(heading.text.toString(), details.text.toString())
+                heading.error = null
+                preview.text =
+                    formatSource(
+                        item.copy(
+                            formatter =
+                                SourceFormatter(
+                                    true,
+                                    heading.text.toString(),
+                                    details.text.toString(),
+                                )
+                        ),
+                        sample,
+                        2160,
+                    )
+            } catch (e: BridgeFailure) {
+                heading.error = e.message
+                preview.text = e.message
+            }
+        }
+        val watcher =
+            object : TextWatcher {
+                override fun beforeTextChanged(
+                    s: CharSequence?,
+                    start: Int,
+                    count: Int,
+                    after: Int,
+                ) {}
+
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    updatePreview()
+                }
+
+                override fun afterTextChanged(s: Editable?) {}
+            }
+        heading.addTextChangedListener(watcher)
+        details.addTextChangedListener(watcher)
+        updatePreview()
+        ui.button(ui.footer, "Apply formatter", primary = true) {
+            try {
+                validateFormatter(heading.text.toString(), details.text.toString())
+                val current = draft.addons.first { it.key == key }
+                replaceAddon(
+                    key,
+                    current.copy(
+                        formatter =
+                            current.formatter.copy(
+                                name = heading.text.toString(),
+                                details = details.text.toString(),
+                            )
+                    ),
+                )
+                addon(key)
+            } catch (e: BridgeFailure) {
+                heading.error = e.message
+            }
+        }
+    }
+
     private fun rowName(row: Row) = rowTitle(draft, row)
 
     private fun rowSummary(row: Row): String {
@@ -558,22 +667,29 @@ internal class Settings(
                 !c.accepts(c.firstArgs(row.args)) -> "Filters need attention"
                 else -> null
             }
-        return listOfNotNull(addon?.let(::name), state).joinToString(" · ")
+        return listOfNotNull(addon?.let(::name), if (!row.enabled) "Off Home" else null, state)
+            .joinToString(" · ")
     }
 
     private fun rows() {
         val body = ui.page("Home rows", { editor() })
         if (draft.rows.isEmpty()) ui.note(body, "Choose the catalogs you want on your Home screen.")
-        for ((index, row) in draft.rows.withIndex()) {
-            val card = ui.card(body, rowName(row), rowSummary(row)) { row(index) }
+        val items = ui.column().also { body.addView(it) }
+        for (row in draft.rows) {
+            val card =
+                ui.card(items, rowName(row), rowSummary(row)) {
+                    row(draft.rows.indexOfFirst { it.key == row.key })
+                }
+            ui.rowToggle(card, rowName(row), row.enabled) { on ->
+                val index = draft.rows.indexOfFirst { it.key == row.key }
+                draft = updateRow(draft, index, draft.rows[index].copy(enabled = on))
+            }
             if (editingRowOrder)
-                ui.orderControls(card, rowName(row), index, draft.rows.size, row.key) { target ->
-                    val scroll = ui.scrollPosition
+                ui.orderControls(card, rowName(row), row.key) { index, target ->
                     draft = draft.copy(rows = moved(draft.rows, index, target))
-                    rows()
-                    ui.restoreScroll(scroll)
                 }
         }
+        if (editingRowOrder) ui.updateOrderControls(items)
         ui.button(ui.footer, "Add catalogs", primary = !editingRowOrder) { picker() }
         if (draft.rows.size > 1)
             ui.button(
@@ -625,21 +741,6 @@ internal class Settings(
                     }
                 }
         }
-        if (draft.rows.size > 1)
-            for ((label, target) in
-                listOf(
-                    "Move up" to index - 1,
-                    "Move down" to index + 1,
-                    "Move to top" to 0,
-                    "Move to bottom" to draft.rows.lastIndex,
-                )) ui.button(
-                body,
-                label,
-                enabled = target in draft.rows.indices && target != index,
-            ) {
-                draft = draft.copy(rows = moved(draft.rows, index, target))
-                rows()
-            }
         ui.divider(body)
         ui.button(body, "Remove from Home", destructive = true) {
             draft = draft.copy(rows = draft.rows.filterIndexed { i, _ -> i != index })

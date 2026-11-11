@@ -122,12 +122,7 @@ internal fun adapt(a: Addon, s: JSONObject, casting: Boolean): Link? {
     return Link(
         a.key,
         source,
-        streamLabel(
-            source,
-            label,
-            height,
-            data?.optJSONObject("service")?.opt("cached") as? Boolean,
-        ),
+        formatSource(a, s, height),
         url,
         format,
         height,

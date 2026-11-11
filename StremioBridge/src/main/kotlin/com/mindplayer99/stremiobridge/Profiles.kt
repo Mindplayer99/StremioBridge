@@ -15,6 +15,7 @@ internal fun profileJson(p: Profile) =
         put("preferred", p.preferred)
         put("initialized", p.initialized)
         put("groupPlayback", p.groupPlayback)
+        put("catalogRowsInitialized", p.catalogRowsInitialized)
         put(
             "addons",
             JSONArray(
@@ -26,6 +27,13 @@ internal fun profileJson(p: Profile) =
                         put("roles", JSONArray(a.switches))
                         put("manifest", a.manifest?.json)
                         put("checked", a.checked)
+                        put(
+                            "formatter",
+                            JSONObject()
+                                .put("enabled", a.formatter.enabled)
+                                .put("name", a.formatter.name)
+                                .put("details", a.formatter.details),
+                        )
                     }
                 }
             ),
@@ -40,6 +48,7 @@ internal fun profileJson(p: Profile) =
                         put("catalog", r.catalog)
                         put("args", JSONObject(r.args))
                         put("title", r.title)
+                        put("enabled", r.enabled)
                     }
                 }
             ),
@@ -48,31 +57,42 @@ internal fun profileJson(p: Profile) =
 
 internal fun readProfile(j: JSONObject) =
     Profile(
-        j.getString("key"),
-        j.getString("name"),
-        j.objects("addons").map { a ->
-            Addon(
-                a.getString("key"),
-                a.getString("url"),
-                a.getBoolean("enabled"),
-                a.strings("roles").toSet(),
-                a.optJSONObject("manifest")?.let(::Manifest),
-                a.optLong("checked"),
-            )
-        },
-        j.objects("rows").map { r ->
-            Row(
-                r.getString("addon"),
-                r.getString("type"),
-                r.getString("catalog"),
-                r.optJSONObject("args")?.mapStrings().orEmpty(),
-                r.optString("title"),
-            )
-        },
-        j.str("preferred"),
-        j.optBoolean("initialized"),
-        j.optBoolean("groupPlayback", true),
-    )
+            j.getString("key"),
+            j.getString("name"),
+            j.objects("addons").map { a ->
+                Addon(
+                    a.getString("key"),
+                    a.getString("url"),
+                    a.getBoolean("enabled"),
+                    a.strings("roles").toSet(),
+                    a.optJSONObject("manifest")?.let(::Manifest),
+                    a.optLong("checked"),
+                    a.optJSONObject("formatter").let { f ->
+                        SourceFormatter(
+                            f?.optBoolean("enabled") == true,
+                            f?.str("name") ?: SourceFormatter.DEFAULT_NAME,
+                            f?.optString("details", SourceFormatter.DEFAULT_DETAILS)
+                                ?: SourceFormatter.DEFAULT_DETAILS,
+                        )
+                    },
+                )
+            },
+            j.objects("rows").map { r ->
+                Row(
+                    r.getString("addon"),
+                    r.getString("type"),
+                    r.getString("catalog"),
+                    r.optJSONObject("args")?.mapStrings().orEmpty(),
+                    r.optString("title"),
+                    r.optBoolean("enabled", true),
+                )
+            },
+            j.str("preferred"),
+            j.optBoolean("initialized"),
+            j.optBoolean("groupPlayback", true),
+            j.optBoolean("catalogRowsInitialized", false),
+        )
+        .let { if (it.catalogRowsInitialized) it else addNewCatalogRows(null, it) }
 
 internal suspend fun refresh(draft: Profile, transport: Transport, force: Boolean): Profile =
     coroutineScope {
@@ -106,7 +126,8 @@ internal suspend fun refresh(draft: Profile, transport: Transport, force: Boolea
                 }
                 .awaitAll()
         val p = draft.copy(addons = checked)
-        if (p.initialized) p else p.copy(rows = p.initialRows(), initialized = true)
+        if (p.initialized) addNewCatalogRows(draft, p)
+        else p.copy(rows = p.initialRows(), initialized = true)
     }
 
 internal data class RefreshResult(val profile: Profile, val failures: Map<String, String>)
@@ -144,7 +165,7 @@ internal suspend fun refreshSelected(
             }
             .awaitAll()
     RefreshResult(
-        profile.copy(addons = results.map { it.first }),
+        addNewCatalogRows(profile, profile.copy(addons = results.map { it.first })),
         results.mapNotNull { (addon, error) -> error?.let { addon.key to it } }.toMap(),
     )
 }

@@ -90,6 +90,8 @@ internal class SettingsPalette(val surface: Int, text: Int, val accent: Int, err
 
 /** Native Views only: no assumptions about the host's Material or Compose classpath. */
 internal class SettingsView(private val activity: Activity, onClose: () -> Unit) {
+    private data class OrderStep(val identity: String, val direction: String, val delta: Int)
+
     val dialog = Dialog(activity)
     private val appearance = activity.getSharedPreferences("stremiobridge-ui", 0)
     var amoled: Boolean
@@ -426,6 +428,7 @@ internal class SettingsView(private val activity: Activity, onClose: () -> Unit)
                     setPadding(0, 0, 0, 0)
                 }
         affordance.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        affordance.tag = "row-affordance"
         item.addView(
             affordance,
             LinearLayout.LayoutParams(dp(if (selected == null) 24 else 40), -2),
@@ -452,12 +455,11 @@ internal class SettingsView(private val activity: Activity, onClose: () -> Unit)
     fun orderControls(
         row: LinearLayout,
         title: String,
-        index: Int,
-        count: Int,
         identity: String = title,
-        move: (Int) -> Unit,
+        move: (Int, Int) -> Unit,
     ) {
-        row.removeViewAt(row.childCount - 1)
+        row.findViewWithTag<View>("row-affordance")?.let { row.removeView(it) }
+        row.findViewWithTag<View>("row-toggle")?.visibility = View.GONE
         val controls = column()
         for ((symbol, delta, direction) in listOf(Triple("↑", -1, "up"), Triple("↓", 1, "down"))) {
             controls.addView(
@@ -466,20 +468,23 @@ internal class SettingsView(private val activity: Activity, onClose: () -> Unit)
                     textSize = 22f
                     setPadding(0, dp(8), 0, dp(8))
                     contentDescription = "Move $title $direction"
-                    tag = "order:$identity:$direction"
-                    isEnabled = index + delta in 0 until count
+                    tag = OrderStep(identity, direction, delta)
                     setOnClickListener {
+                        val parent = row.parent as LinearLayout
+                        val index = parent.indexOfChild(row)
+                        val target = index + delta
+                        if (target !in 0 until parent.childCount) return@setOnClickListener
                         val focused = isFocused && !isInTouchMode
-                        move(index + delta)
+                        val position = scrollPosition
+                        move(index, target)
+                        parent.removeView(row)
+                        parent.addView(row, target)
+                        updateOrderControls(parent)
+                        restoreScroll(position)
                         if (focused)
                             root.post {
-                                val preferred =
-                                    root.findViewWithTag<View>("order:$identity:$direction")
-                                val alternate =
-                                    root.findViewWithTag<View>(
-                                        "order:$identity:${if (direction == "up") "down" else "up"}"
-                                    )
-                                (preferred?.takeIf { it.isEnabled } ?: alternate)?.requestFocus()
+                                val alternate = controls.getChildAt(if (direction == "up") 1 else 0)
+                                (this.takeIf { it.isEnabled } ?: alternate).requestFocus()
                             }
                     }
                 },
@@ -487,6 +492,43 @@ internal class SettingsView(private val activity: Activity, onClose: () -> Unit)
             )
         }
         row.addView(controls, LinearLayout.LayoutParams(dp(48), -2).apply { marginStart = dp(8) })
+    }
+
+    fun updateOrderControls(parent: LinearLayout) {
+        fun refresh(view: View, index: Int) {
+            val delta = (view.tag as? OrderStep)?.delta
+            if (delta != null) view.isEnabled = index + delta in 0 until parent.childCount
+            if (view is ViewGroup)
+                for (i in 0 until view.childCount) refresh(view.getChildAt(i), index)
+        }
+        for (i in 0 until parent.childCount) refresh(parent.getChildAt(i), i)
+    }
+
+    fun rowToggle(row: LinearLayout, title: String, checked: Boolean, changed: (Boolean) -> Unit) {
+        row.findViewWithTag<View>("row-affordance")?.let { row.removeView(it) }
+        val description = row.contentDescription.toString()
+        fun style(on: Boolean) {
+            row.background = interactive(if (on) palette.row else palette.surface)
+            val labels = row.getChildAt(0) as LinearLayout
+            (labels.getChildAt(0) as TextView).setTextColor(if (on) palette.ink else palette.muted)
+            row.contentDescription = "$description, ${if (on) "On Home" else "Off Home"}"
+        }
+        row.addView(
+            Switch(activity).apply {
+                tag = "row-toggle"
+                contentDescription = "Show $title on Home"
+                minimumWidth = dp(48)
+                minimumHeight = dp(48)
+                thumbTintList = choiceColors()
+                isChecked = checked
+                setOnCheckedChangeListener { _, on ->
+                    style(on)
+                    changed(on)
+                }
+            },
+            LinearLayout.LayoutParams(dp(56), dp(48)),
+        )
+        style(checked)
     }
 
     fun button(

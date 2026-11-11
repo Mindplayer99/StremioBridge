@@ -47,10 +47,7 @@ internal class BridgeProvider(private val profile: Profile, private val refs: Re
     private val catalogs = Catalogs(profile, Http)
     private val metadata = Metadata(profile, Http)
     private val playback = Playback(profile, Http)
-    private val routes =
-        profile.rows
-            .filter { r -> profile.catalog(r)?.let { it.accepts(it.firstArgs(r.args)) } == true }
-            .associateBy { it.key }
+    private val routes = profile.visibleRows().associateBy { it.key }
     override val mainPage = run {
         val used = mutableSetOf<String>()
         routes.values.map { r ->

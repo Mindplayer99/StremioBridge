@@ -222,7 +222,12 @@ class SettingsTest {
             click("genre")
             click("Comedy")
             click("Apply filters")
-            click("Move to bottom")
+            click("Back")
+            click("Edit order")
+            views()
+                .single { it.contentDescription == "Move Popular (Movies) · Comedy down" }
+                .performClick()
+            shadowOf(Looper.getMainLooper()).idle()
             click("Back")
             click("Save changes")
             awaitSaved { store.all().single().rows.last().args["genre"] == "Comedy" }
@@ -247,6 +252,90 @@ class SettingsTest {
             click("Back")
             click("Discard")
             assertTrue(store.all().single().addons.single().enabled)
+        }
+    }
+
+    @Test
+    fun rowSwitchesAndInPlaceOrderingKeepViewsFiltersAndDraftState() {
+        val a = addon("Catalog")
+        val first = Row(a.key, "movie", "popular", mapOf("genre" to "Horror"), "First row")
+        val second = Row(a.key, "series", "series", title = "Second row")
+        withSettings(
+            Profile(
+                name = "Cinema",
+                addons = listOf(a),
+                rows = listOf(first, second),
+                initialized = true,
+            )
+        ) { store ->
+            click("Cinema")
+            click("Home rows")
+            val toggle =
+                views().single { it.contentDescription == "Show First row on Home" } as Switch
+            toggle.performClick()
+            assertFalse(toggle.isChecked)
+            assertTrue(store.all().single().rows.first().enabled)
+            click("Edit order")
+            val decor = dialog().window!!.decorView
+            val scroller = views().filterIsInstance<android.widget.ScrollView>().single()
+            val arrow = views().single { it.contentDescription == "Move Second row up" }
+            arrow.performClick()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertSame(decor, dialog().window!!.decorView)
+            assertSame(scroller, views().filterIsInstance<android.widget.ScrollView>().single())
+            assertSame(arrow, views().single { it.contentDescription == "Move Second row up" })
+            assertFalse(arrow.isEnabled)
+            click("Done ordering")
+            click("Second row")
+            assertFalse(
+                views().filterIsInstance<TextView>().any { it.text.toString() == "Move up" }
+            )
+            click("Back")
+            screenshot("rows-disabled-and-reordered")
+            click("Back")
+            click("Save changes")
+            awaitSaved { store.all().single().rows.first().title == "Second row" }
+            assertFalse(store.all().single().rows.last().enabled)
+            assertEquals(mapOf("genre" to "Horror"), store.all().single().rows.last().args)
+        }
+    }
+
+    @Test
+    fun formatterIsPerAddonOffByDefaultEditableAndSavedOnlyWithTheProfile() {
+        val a = addon("Source", "[\"stream\",\"subtitles\"]")
+        val b = addon("Other", "[\"stream\"]")
+        withSettings(Profile(name = "Cinema", addons = listOf(a, b), initialized = true)) { store ->
+            click("Cinema")
+            click("Addons")
+            click("Fixture Source")
+            assertFalse(
+                views()
+                    .filterIsInstance<Switch>()
+                    .single { it.text.toString() == "Use bridge formatter" }
+                    .isChecked
+            )
+            click("Use bridge formatter")
+            click("Edit bridge formatter")
+            screenshot("formatter-editor")
+            val heading =
+                views().filterIsInstance<android.widget.EditText>().single {
+                    it.tag == "formatter-Name template"
+                }
+            heading.setText("{unknown}")
+            click("Apply formatter")
+            assertNotNull(heading.error)
+            heading.setText("☁ {addon} · {resolution}")
+            click("Apply formatter")
+            click("Back")
+            click("Back")
+            assertFalse(store.all().single().addons.first().formatter.enabled)
+            click("Save changes")
+            awaitSaved { store.all().single().addons.first().formatter.enabled }
+            assertEquals(
+                "☁ {addon} · {resolution}",
+                store.all().single().addons.first().formatter.name,
+            )
+            assertFalse(store.all().single().addons.last().formatter.enabled)
         }
     }
 

@@ -199,6 +199,7 @@ internal data class Addon(
     val switches: Set<String> = roles.toSet(),
     val manifest: Manifest? = null,
     val checked: Long = 0,
+    val formatter: SourceFormatter = SourceFormatter(),
 ) {
     fun uses(role: String) = enabled && role in switches && manifest != null
 }
@@ -209,6 +210,7 @@ internal data class Row(
     val catalog: String,
     val args: Map<String, String> = emptyMap(),
     val title: String = "",
+    val enabled: Boolean = true,
 ) {
     val key
         get() =
@@ -229,6 +231,7 @@ internal data class Profile(
     val preferred: String? = null,
     val initialized: Boolean = false,
     val groupPlayback: Boolean = true,
+    val catalogRowsInitialized: Boolean = true,
 ) {
     fun catalog(r: Row) =
         addons
@@ -237,15 +240,47 @@ internal data class Profile(
             ?.catalogs
             ?.firstOrNull { it.id == r.catalog && it.type == r.type }
 
-    fun initialRows() =
-        addons
-            .filter { it.uses("catalog") }
-            .flatMap { a ->
-                a.manifest!!
-                    .catalogs
-                    .filter { it.accepts(it.firstArgs(emptyMap())) }
-                    .take(3)
-                    .map { Row(a.key, it.type, it.id) }
+    fun initialRows() = discoveredRows(addons)
+
+    fun visibleRows() =
+        rows.filter { row ->
+            row.enabled && catalog(row)?.let { it.accepts(it.firstArgs(row.args)) } == true
+        }
+}
+
+internal fun discoveredRows(addons: List<Addon>): List<Row> =
+    addons.flatMap { addon ->
+        addon.manifest
+            ?.catalogs
+            .orEmpty()
+            .filter { catalog ->
+                catalog.type in mediaTypes &&
+                    catalog.extras.none { it.name == "search" && it.required }
             }
-            .take(8)
+            .map { catalog ->
+                Row(
+                    addon.key,
+                    catalog.type,
+                    catalog.id,
+                    enabled = catalog.accepts(catalog.firstArgs(emptyMap())),
+                )
+            }
+    }
+
+internal fun addNewCatalogRows(before: Profile?, after: Profile): Profile {
+    val candidates =
+        discoveredRows(after.addons).filter { row ->
+            before == null ||
+                before.addons
+                    .firstOrNull { it.key == row.addon }
+                    ?.manifest
+                    ?.catalogs
+                    .orEmpty()
+                    .none { it.type == row.type && it.id == row.catalog }
+        }
+    val keys = after.rows.map { it.key }.toSet()
+    return after.copy(
+        rows = after.rows + candidates.filterNot { it.key in keys },
+        catalogRowsInitialized = true,
+    )
 }

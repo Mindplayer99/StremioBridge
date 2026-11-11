@@ -184,7 +184,7 @@ internal class Metadata(
                             }
                         }
                     }
-                    ready.send(Result(index, result))
+                    ready.trySend(Result(index, result))
                 }
             }
         val started = now()

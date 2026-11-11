@@ -160,7 +160,7 @@ class SettingsVisualTest {
         val bitmap = Bitmap.createBitmap(decor.width, decor.height, Bitmap.Config.ARGB_8888)
         decor.draw(Canvas(bitmap))
         val directory =
-            File(System.getProperty("java.io.tmpdir"), "stremiobridge-ui-v4").apply { mkdirs() }
+            File(System.getProperty("java.io.tmpdir"), "stremiobridge-ui-v5").apply { mkdirs() }
         File(directory, "$name.png").outputStream().use {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
         }
@@ -272,6 +272,7 @@ class SettingsVisualTest {
                         "Details & episodes",
                         "Playback",
                         "Subtitles",
+                        "Use bridge formatter",
                     ),
                     views().filterIsInstance<Switch>().map { it.text.toString() }.toSet(),
                 )
@@ -280,7 +281,6 @@ class SettingsVisualTest {
                         "Refresh manifest",
                         "Open addon settings",
                         "Edit install link",
-                        "Change addon order",
                         "Remove addon",
                     )) label(control)
                 val scroll = views().filterIsInstance<ScrollView>().single()
@@ -299,14 +299,11 @@ class SettingsVisualTest {
                         "Rename row",
                         "Edit filters",
                         "Add filtered copy",
-                        "Move up",
-                        "Move down",
-                        "Move to top",
-                        "Move to bottom",
                         "Remove from Home",
                     )) label(control)
-                assertFalse(target("Move up").isEnabled)
-                assertFalse(target("Move to top").isEnabled)
+                assertFalse(
+                    views().filterIsInstance<TextView>().any { it.text.toString() == "Move up" }
+                )
                 click("Edit filters")
                 click("genre")
                 render(activity, "filter-choice-$mode")
@@ -562,6 +559,59 @@ class SettingsVisualTest {
             assertFalse(error.isShowing)
             ui.dialog.dismiss()
             controller.pause().stop().destroy()
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w320dp-h568dp-xhdpi")
+    fun optionalFormatterPreviewAndOffRowsRemainUsableInBothThemesAndWithKeyboard() {
+        for (light in listOf(false, true)) withSettings(listOf(profile()), light) { activity, store
+            ->
+            val before = profileJson(store.all().single()).toString()
+            val mode = if (light) "light" else "dark"
+            click("Cinema")
+            click("Addons")
+            click(longName)
+            click("Use bridge formatter")
+            click("Edit bridge formatter")
+            render(activity, "formatter-top-$mode", heightDp = 520)
+            visible("Apply formatter")
+            val scroll = views().filterIsInstance<ScrollView>().single()
+            scroll.scrollTo(0, scroll.getChildAt(0).height)
+            render(activity, "formatter-preview-$mode", heightDp = 520)
+            assertTrue(
+                views().filterIsInstance<TextView>().any {
+                    it.text.toString().contains("▣ 4K ⚡ Cached")
+                }
+            )
+            visible("Apply formatter")
+            val field = views().filterIsInstance<EditText>().first()
+            field.requestFocus()
+            val input =
+                activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            input.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
+            assertTrue(shadowOf(input).isSoftInputVisible)
+            render(activity, "formatter-keyboard-$mode", heightDp = 280)
+            visible("Apply formatter")
+            input.hideSoftInputFromWindow(field.windowToken, 0)
+            back()
+            back()
+            back()
+            click("Home rows")
+            val off =
+                views().filterIsInstance<Switch>().single {
+                    it.contentDescription == "Show Weekend favorites on Home"
+                }
+            off.performClick()
+            render(activity, "row-off-$mode", heightDp = 520)
+            assertFalse(off.isChecked)
+            click("Edit order")
+            render(activity, "row-order-$mode", heightDp = 520)
+            visible("Done ordering")
+            back()
+            back()
+            click("Discard")
+            assertEquals(before, profileJson(store.all().single()).toString())
         }
     }
 }
