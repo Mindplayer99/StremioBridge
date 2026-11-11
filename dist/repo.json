@@ -1,0 +1,8 @@
+{
+  "name": "StremioBridge",
+  "description": "Native Stremio addon profiles for CloudStream",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/Mindplayer99/StremioBridge/main/dist/plugins.json"
+  ]
+}

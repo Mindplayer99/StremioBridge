@@ -1,0 +1,185 @@
+package com.mindplayer99.stremiobridge
+
+import android.content.Context
+import android.util.AtomicFile
+import java.io.File
+import java.io.FileNotFoundException
+import kotlinx.coroutines.*
+import org.json.JSONArray
+import org.json.JSONObject
+
+internal fun profileJson(p: Profile) =
+    JSONObject().apply {
+        put("key", p.key)
+        put("name", p.name)
+        put("preferred", p.preferred)
+        put("initialized", p.initialized)
+        put(
+            "addons",
+            JSONArray(
+                p.addons.map { a ->
+                    JSONObject().apply {
+                        put("key", a.key)
+                        put("url", a.url)
+                        put("enabled", a.enabled)
+                        put("roles", JSONArray(a.switches))
+                        put("manifest", a.manifest?.json)
+                        put("checked", a.checked)
+                    }
+                }
+            ),
+        )
+        put(
+            "rows",
+            JSONArray(
+                p.rows.map { r ->
+                    JSONObject().apply {
+                        put("addon", r.addon)
+                        put("type", r.type)
+                        put("catalog", r.catalog)
+                        put("args", JSONObject(r.args))
+                        put("title", r.title)
+                    }
+                }
+            ),
+        )
+    }
+
+internal fun readProfile(j: JSONObject) =
+    Profile(
+        j.getString("key"),
+        j.getString("name"),
+        j.objects("addons").map { a ->
+            Addon(
+                a.getString("key"),
+                a.getString("url"),
+                a.getBoolean("enabled"),
+                a.strings("roles").toSet(),
+                a.optJSONObject("manifest")?.let(::Manifest),
+                a.optLong("checked"),
+            )
+        },
+        j.objects("rows").map { r ->
+            Row(
+                r.getString("addon"),
+                r.getString("type"),
+                r.getString("catalog"),
+                r.optJSONObject("args")?.mapStrings().orEmpty(),
+                r.optString("title"),
+            )
+        },
+        j.str("preferred"),
+        j.optBoolean("initialized"),
+    )
+
+internal suspend fun refresh(draft: Profile, transport: Transport, force: Boolean): Profile =
+    coroutineScope {
+        val checked =
+            draft.addons
+                .mapIndexed { i, a ->
+                    async {
+                        if (!a.enabled || !force && a.manifest != null) return@async a
+                        try {
+                            val endpoint = Endpoint(a.url)
+                            val manifest =
+                                Manifest.discover(transport.get(endpoint.manifest, false), endpoint)
+                            a.copy(
+                                url = endpoint.manifest,
+                                manifest = manifest,
+                                checked = System.currentTimeMillis(),
+                            )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: NeedsConfiguration) {
+                            throw e
+                        } catch (e: Exception) {
+                            throw BridgeFailure(
+                                "Addon " +
+                                    (i + 1) +
+                                    " • " +
+                                    ((e as? BridgeFailure)?.message ?: "Refresh failed.")
+                            )
+                        }
+                    }
+                }
+                .awaitAll()
+        val p = draft.copy(addons = checked)
+        if (p.initialized) p else p.copy(rows = p.initialRows(), initialized = true)
+    }
+
+internal fun template(p: Profile) =
+    JSONObject()
+        .put("stremioBridge", 1)
+        .put(
+            "slots",
+            JSONArray(
+                p.addons.map { a ->
+                    JSONObject()
+                        .put("enabled", a.enabled)
+                        .put("roles", JSONArray(roles.filter { it in a.switches }))
+                }
+            ),
+        )
+        .put("metadata", p.addons.indexOfFirst { it.key == p.preferred })
+        .toString(2)
+
+internal fun importTemplate(raw: String, name: String): Profile {
+    require(raw.length <= 65_536)
+    val j = JSONObject(raw)
+    require(j.getInt("stremioBridge") == 1 && j.getJSONArray("slots").length() in 1..100)
+    val a =
+        j.objects("slots").map {
+            Addon(
+                freshId(),
+                "",
+                it.getBoolean("enabled"),
+                it.strings("roles").intersect(roles.toSet()),
+            )
+        }
+    require(a.size == j.getJSONArray("slots").length())
+    return Profile(name = name, addons = a, preferred = a.getOrNull(j.optInt("metadata", -1))?.key)
+}
+
+internal class ProfileStore(ctx: Context) {
+    private companion object {
+        val lock = Any()
+    }
+
+    private val file = AtomicFile(File(ctx.noBackupFilesDir, "stremiobridge-profiles-v1.json"))
+
+    fun all(): List<Profile> =
+        synchronized(lock) {
+            val raw =
+                try {
+                    file.openRead().bufferedReader().use { it.readText() }
+                } catch (_: FileNotFoundException) {
+                    return emptyList()
+                }
+            JSONArray(raw).values().map { readProfile(it as JSONObject) }
+        }
+
+    fun replace(expected: Profile?, updated: Profile?): List<Profile> =
+        synchronized(lock) {
+            val key = (expected ?: updated)!!.key
+            val next = all().toMutableList()
+            val idx = next.indexOfFirst { it.key == key }
+            if (
+                next.getOrNull(idx)?.let(::profileJson)?.toString() !=
+                    expected?.let(::profileJson)?.toString()
+            )
+                throw BridgeFailure("This profile changed in another editor. Reopen it.")
+            if (updated != null && next.any { it.key != key && it.name.equals(updated.name, true) })
+                throw BridgeFailure("Choose a different profile name.")
+            if (updated == null) next.removeAt(idx)
+            else if (idx < 0) next.add(updated) else next[idx] = updated
+            val out = file.startWrite()
+            try {
+                out.write(JSONArray(next.map(::profileJson)).toString().toByteArray(Charsets.UTF_8))
+                file.finishWrite(out)
+            } catch (e: Exception) {
+                file.failWrite(out)
+                throw e
+            }
+            next
+        }
+}
