@@ -30,9 +30,9 @@ jobs:
           name: StremioBridge
           path: dist/
           if-no-files-found: error
-  update-private-dist:
+  update-dist:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.private && github.repository != 'Mindplayer99/TPBBridge'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository != 'Mindplayer99/TPBBridge'
     runs-on: ubuntu-latest
     permissions:
       contents: write

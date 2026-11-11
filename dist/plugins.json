@@ -1,9 +1,9 @@
 [
   {
-    "fileHash": "sha256-9672305ddcdabfbe7ea6abec14742df389ab53a3c726a03c619bc15a4707cc23",
+    "fileHash": "sha256-a452591d1f51df640e627fbafaab5d3158dbd27d63e64010d6e90ede616e18ea",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/Mindplayer99/StremioBridge",
-    "fileSize": 111344,
+    "fileSize": 129675,
     "status": 3,
     "language": "en",
     "authors": [
@@ -16,7 +16,7 @@
       "AnimeMovie",
       "Live"
     ],
-    "version": 1,
+    "version": 2,
     "internalName": "StremioBridge",
     "description": "Browse Stremio catalogs, combine metadata and play addon-resolved media in CloudStream.",
     "url": "https://raw.githubusercontent.com/Mindplayer99/StremioBridge/main/dist/StremioBridge.cs3",

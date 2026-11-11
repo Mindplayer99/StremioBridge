@@ -1,4 +1,4 @@
-# StremioBridge v1
+# StremioBridge v2
 
 StremioBridge adds one native CloudStream provider per profile. Browse catalogs from Xperience or AIOMetadata, open details from a preferred metadata addon, and pass playback links from AIOStreams to the CloudStream player. TorBox stays configured in AIOStreams. A combined addon can supply several resources.
 
@@ -11,8 +11,8 @@ StremioBridge adds one native CloudStream provider per profile. Browse catalogs 
    ```
 
 2. Open the **StremioBridge** repository, tap **Install** beside the extension, then open its settings gear.
-3. Select **Create profile**, enter its name and paste one configured install link per line. The final URL path ends in `/manifest.json` and may include query parameters. HTTP, HTTPS and `stremio://` links are supported. A configuration-required manifest offers a browser setup link. AIOStreams JSON settings exports belong in its own configurator.
-4. Choose **Home rows**, then **Preferred metadata addon** and **Save + refresh**. Select **StremioBridge · your profile name** as the CloudStream Home provider. Include the profile in global search if your search provider selection is restricted.
+3. Select **New profile**, enter its name, then open **Addons → Add addons** and paste one configured install link per line. The final URL path ends in `/manifest.json` and may include query parameters. HTTP, HTTPS and `stremio://` links are supported. A configuration-required manifest offers a browser setup link. AIOStreams JSON settings exports belong in its own configurator.
+4. Choose catalogs under **Home rows**, set the **Metadata provider**, then tap **Save changes**. Select **StremioBridge · your profile name** as the CloudStream Home provider. Include the profile in global search if your search provider selection is restricted.
 
 | Addon in a typical profile | Resource switches to enable |
 |---|---|
@@ -21,9 +21,24 @@ StremioBridge adds one native CloudStream provider per profile. Browse catalogs 
 | AIOStreams | Stream. Enable subtitles if advertised. Resolved TorBox and Usenet HTTP links use the same path. |
 | Separate subtitle addon | Subtitles. It receives the movie ID or the exact episode video ID. |
 
+## Settings controls
+
+| Control | What it changes |
+|---|---|
+| **Save changes** | Commits this profile. Validates new addons; ordinary edits use already validated manifests. |
+| **Refresh manifest** | Fetches the addon's advertised features and catalogs. A failed refresh keeps the previous snapshot. This does not test whether a video plays. |
+| **Browse & search** | Lets the addon supply Home catalogs and search results. |
+| **Details & episodes** | Lets it supply descriptions, artwork and episode lists. **Metadata provider** chooses the first compatible addon to try. |
+| **Playback / Subtitles** | Lets it supply playable sources or subtitle files. Switches appear only for advertised resources. |
+| **Home rows** | Selects visible catalogs. Edit a row's filters, make a filtered copy, rename it or change its position. |
+| **Open addon settings** | Opens the addon's browser configurator when advertised. If setup gives you a new install link, paste it under **Edit install link**. |
+| **Change addon order** | Changes metadata fallback and collection order. CloudStream still controls final playback source sorting. |
+
+Edits stay in a draft until **Save changes**. Back from the profile offers Save, Discard or Keep editing. **Backup & profile** contains encrypted export, duplication and deletion; restore creates a separate profile.
+
 ## Behavior and limitations
 
-- Home initially selects up to three compatible rows per addon and eight total. The searchable picker can add additional rows, including fixed filters. Search-only and required-filter catalogs need the appropriate parameters. Catalog pagination uses actual response lengths, rebuilds missing offsets and stops on empty or repeated results.
+- Home initially selects up to three compatible rows per addon and eight total. The searchable picker can add several catalogs together. Row controls edit filters, create a filtered copy, rename, remove or move a row to either end. Search-only and required-filter catalogs need the appropriate parameters. Catalog pagination uses actual response lengths, rebuilds missing offsets and stops on empty or repeated results.
 - Metadata routing checks media type and declared ID prefixes. Returned IDs or explicit external IDs must match. Series and anime retain their season numbers, specials and exact video IDs, including Kitsu episodes inside a TVDB page. The bridge can fall back to catalog preview data.
 - Direct HTTP, HLS and DASH use native playback. Signed URLs, Referer and request headers pass through. The bridge requests fresh media URLs when CloudStream invokes its playback callback. An extensionless link without filename or MIME hints uses direct video.
 - Source labels and upstream order are preserved on emission. CloudStream applies its own quality/source profile and collapses identical URL strings, including variants that differ only in headers. The host can reuse its link cache for 20 minutes. Reload sources if a signed link expires.
@@ -34,9 +49,9 @@ StremioBridge adds one native CloudStream provider per profile. Browse catalogs 
 
 ## Profiles and privacy
 
-Save validates every enabled manifest before committing the profile. Disable an offline addon in the draft to save other changes. Profiles, configured URLs and item references use Android app-private no-backup storage. CloudStream history receives opaque routing keys. Deleting a profile removes its references.
+Save validates enabled addons that have no validated manifest. Existing roles, row order and filters save using the last working snapshot. Refresh is a separate action. Successful refreshes update the draft, and failures retain the previous snapshot with an error message. Save changes commits the result. Profiles, configured URLs and item references use Android app-private no-backup storage. CloudStream history receives opaque routing keys. Deleting a profile removes its references.
 
-**Advanced → Copy encrypted full backup** preserves addon links, switches, priority and selected rows using a passphrase on Android 8+. The format uses PBKDF2-HMAC-SHA256 and AES-256-GCM. **Copy safe template** contains slot order and switches. Restore as a separate profile and re-enter links when using a template.
+**Backup & profile → Export encrypted backup** preserves addon links, switches, priority and selected rows using a passphrase on Android 8+. The format uses PBKDF2-HMAC-SHA256 and AES-256-GCM. Copy the encrypted text and keep its passphrase separately. **Restore encrypted backup** opens it as a separate profile. Backups created by v1 remain compatible.
 
 The bridge keeps signed playback links out of its persistent records. CloudStream, its downloader, subtitle handler and any external player receive the URLs needed to play. Host debug logs and exported downloads can contain sensitive data. Artwork URLs containing recognized credential parameters may be omitted.
 
@@ -57,6 +72,6 @@ For another device-accessible host, run `python3 scripts/package_release.py --ba
 
 ## Validation
 
-All 13 automated tests passed for this build. The test suite exercises URL encoding and redirects, resource routing, partial failures, pagination, movie and episode identities, headers, ordering, subtitle scoping, encrypted backup/restore and native settings. A Robolectric journey runs the published CloudStream Home, search, detail and link APIs against local synthetic addons on simulated Android 14. The compiled extension was also checked against the official Blue stable 4.9.1 APK for the host APIs it references. Device installation, media decoding, casting, downloading and real account playback require on-device verification.
+All 19 automated tests passed for this build. The release checks include the existing protocol and playback fixtures plus settings tests for offline saves, batch selection, filter editing and repair, role preservation, discarded drafts and partial refresh failures. The settings are rendered for visual review in light and dark Android themes, with compact-window checks for visible action buttons. The protocol suite exercises URL encoding and redirects, resource routing, partial failures, pagination, movie and episode identities, headers, ordering, subtitle scoping, encrypted backup/restore and native settings. A Robolectric journey runs the published CloudStream Home, search, detail and link APIs against local synthetic addons on simulated Android 14. The compiled extension was also checked against the official Blue stable 4.9.1 APK for the host APIs it references. Device installation, media decoding, casting, downloading and real account playback require on-device verification.
 
 References include the [Stremio manifest rules](https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/manifest.md), [subtitle request specification](https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/requests/defineSubtitlesHandler.md), [AIOStreams](https://docs.aiostreams.viren070.me/), [AIOMetadata](https://github.com/cedya77/aiometadata/tree/dev) and the [Xperience guide](https://xperience-app.com/guide).

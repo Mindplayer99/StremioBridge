@@ -263,7 +263,6 @@ class ProtocolTest {
             fail("Expected refresh failure")
         } catch (_: BridgeFailure) {}
         assertEquals(raw, profileJson(p).toString())
-        assertTrue(importTemplate(template(p), "Work").addons.all { it.url.isEmpty() })
         val encrypted = Backup.seal(p, "example test password".toCharArray())
         assertFalse(encrypted.contains("example/manifest"))
         assertFalse(encrypted.contains(p.key))

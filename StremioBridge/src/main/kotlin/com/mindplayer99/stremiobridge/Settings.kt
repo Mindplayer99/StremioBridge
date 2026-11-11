@@ -7,82 +7,68 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
-import android.view.WindowManager
-import android.widget.*
+import android.text.method.PasswordTransformationMethod
+import android.widget.ArrayAdapter
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.Toast
+import java.net.URI
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.*
 
 internal class Settings(
-    private val a: Activity,
+    private val activity: Activity,
     private val store: ProfileStore,
     private val commit: (Profile?, Profile?) -> Unit,
 ) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val ui = SettingsView(activity) { scope.cancel() }
     private var original: Profile? = null
     private var draft = Profile()
+    private val errors = mutableMapOf<String, String>()
+    private val roleNames =
+        mapOf(
+            "catalog" to "Browse & search",
+            "meta" to "Details & episodes",
+            "stream" to "Playback",
+            "subtitles" to "Subtitles",
+        )
 
-    private fun toast(message: String) = Toast.makeText(a, message, Toast.LENGTH_LONG).show()
+    private fun alive() = !activity.isFinishing && !activity.isDestroyed && ui.dialog.isShowing
 
-    private fun menu(
-        title: String,
-        labels: List<String>,
-        back: (() -> Unit)? = null,
-        select: (Int) -> Unit,
-    ) {
-        val b =
-            AlertDialog.Builder(a).setTitle(title).setItems(labels.toTypedArray()) { _, i ->
-                select(i)
-            }
-        if (back != null)
-            b.setNegativeButton("Back") { _, _ -> back() }.setOnCancelListener { back() }
-        b.show()
+    private fun toast(message: String) = Toast.makeText(activity, message, Toast.LENGTH_LONG).show()
+
+    private fun dirty() = original?.let(::profileJson)?.toString() != profileJson(draft).toString()
+
+    private fun host(addon: Addon) = runCatching { URI(addon.url).host }.getOrNull().orEmpty()
+
+    private fun name(addon: Addon) = addon.manifest?.name ?: "Unverified addon"
+
+    private fun summary(addon: Addon): String =
+        if (!addon.enabled) "Disabled"
+        else
+            addon.manifest
+                ?.capabilities
+                .orEmpty()
+                .filter { it in addon.switches }
+                .joinToString(" · ") { roleNames.getValue(it) }
+                .ifBlank { "No roles enabled" }
+
+    private fun replaceAddon(key: String, value: Addon) {
+        draft = draft.copy(addons = draft.addons.map { if (it.key == key) value else it })
     }
 
-    private fun input(
-        title: String,
-        value: String = "",
-        secret: Boolean = false,
-        multi: Boolean = false,
-        back: () -> Unit,
-        done: (String) -> Unit,
-    ) {
-        val field =
-            EditText(a).apply {
-                inputType =
-                    InputType.TYPE_CLASS_TEXT or
-                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
-                        (if (secret) InputType.TYPE_TEXT_VARIATION_PASSWORD else 0) or
-                        (if (multi) InputType.TYPE_TEXT_FLAG_MULTI_LINE else 0)
-                setSingleLine(!multi)
-                if (multi) minLines = 3
-                setText(value)
-                setSelection(length())
-                if (android.os.Build.VERSION.SDK_INT >= 26)
-                    importantForAutofill =
-                        android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
-            }
-        val dialog =
-            AlertDialog.Builder(a)
-                .setTitle(title)
-                .setView(field)
-                .setPositiveButton("Continue", null)
-                .setNegativeButton("Back") { _, _ -> back() }
-                .setOnCancelListener { back() }
-                .create()
-        if (secret) dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        dialog.show()
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val s = field.text.toString().trim()
-            if (s.isBlank()) field.error = "Enter a value."
-            else {
-                dialog.dismiss()
-                done(s)
-            }
+    private fun <T> moved(items: List<T>, index: Int, target: Int) =
+        items.toMutableList().apply {
+            val item = removeAt(index)
+            add(target.coerceIn(0, size), item)
         }
-    }
 
     private fun <T> work(
         title: String,
@@ -90,389 +76,576 @@ internal class Settings(
         task: suspend () -> T,
         done: (T) -> Unit,
     ) {
-        val job = SupervisorJob()
-        val dialog =
-            AlertDialog.Builder(a)
+        var job: Job? = null
+        val progress =
+            AlertDialog.Builder(activity)
                 .setMessage(title)
                 .setNegativeButton("Cancel") { _, _ ->
-                    job.cancel()
-                    back()
+                    job?.cancel()
+                    if (alive()) back()
                 }
                 .setOnCancelListener {
-                    job.cancel()
-                    back()
+                    job?.cancel()
+                    if (alive()) back()
                 }
                 .show()
-        CoroutineScope(Dispatchers.Main + job).launch {
-            try {
-                val result = withContext(Dispatchers.IO) { task() }
-                if (!a.isFinishing && !a.isDestroyed) {
-                    dialog.dismiss()
-                    done(result)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: NeedsConfiguration) {
-                if (!a.isFinishing && !a.isDestroyed) {
-                    dialog.dismiss()
-                    AlertDialog.Builder(a)
-                        .setTitle("Addon setup required")
-                        .setMessage(
-                            "Finish setup in the browser, then paste the configured install link."
-                        )
-                        .setPositiveButton("Open setup") { _, _ ->
-                            runCatching {
-                                a.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(e.page)))
+        job =
+            scope.launch {
+                try {
+                    val result = withContext(Dispatchers.IO) { task() }
+                    ensureActive()
+                    if (alive()) {
+                        progress.dismiss()
+                        done(result)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: NeedsConfiguration) {
+                    if (alive()) {
+                        progress.dismiss()
+                        AlertDialog.Builder(activity)
+                            .setTitle("Finish addon setup")
+                            .setMessage(
+                                "Configure the addon in your browser, then paste its final install link."
+                            )
+                            .setPositiveButton("Open setup") { _, _ ->
+                                openBrowser(e.page)
+                                back()
                             }
-                            back()
-                        }
-                        .setNegativeButton("Back") { _, _ -> back() }
-                        .setOnCancelListener { back() }
-                        .show()
+                            .setNegativeButton("Back") { _, _ -> back() }
+                            .setOnCancelListener { back() }
+                            .show()
+                    }
+                } catch (e: Exception) {
+                    if (alive()) {
+                        progress.dismiss()
+                        back()
+                        AlertDialog.Builder(activity)
+                            .setTitle("Could not finish")
+                            .setMessage(
+                                (e as? BridgeFailure)?.message ?: "Check the input and try again."
+                            )
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                } finally {
+                    progress.dismiss()
                 }
-            } catch (e: Exception) {
-                if (!a.isFinishing && !a.isDestroyed) {
-                    dialog.dismiss()
-                    toast(
-                        (e as? BridgeFailure)?.message
-                            ?: "Operation failed. Check the input and try again."
-                    )
-                    back()
-                }
-            } finally {
-                job.complete()
             }
+    }
+
+    private fun input(
+        title: String,
+        value: String = "",
+        secret: Boolean = false,
+        multiline: Boolean = false,
+        action: String,
+        back: () -> Unit,
+        done: (String) -> Unit,
+    ) {
+        val body = ui.page(title, back, secure = secret)
+        val field =
+            EditText(activity).apply {
+                inputType =
+                    InputType.TYPE_CLASS_TEXT or
+                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
+                        (if (multiline) InputType.TYPE_TEXT_FLAG_MULTI_LINE else 0)
+                setSingleLine(!multiline)
+                if (multiline) {
+                    minLines = 3
+                    maxLines = 7
+                }
+                if (Build.VERSION.SDK_INT >= 26)
+                    importantForAutofill =
+                        android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+                if (secret) transformationMethod = PasswordTransformationMethod.getInstance()
+                setText(value)
+                setSelection(length())
+            }
+        body.addView(field, LinearLayout.LayoutParams(-1, -2))
+        if (secret)
+            ui.toggle(
+                body,
+                if (title.contains("passphrase", true)) "Show passphrase" else "Show links",
+                false,
+            ) {
+                field.transformationMethod =
+                    if (it) null else PasswordTransformationMethod.getInstance()
+                field.setSelection(field.length())
+            }
+        if (multiline && title == "Add addons")
+            ui.note(body, "Paste configured manifest URLs, one per line.")
+        ui.button(ui.footer, action, primary = true) {
+            val text = field.text.toString()
+            if (text.isBlank()) field.error = "Enter a value."
+            else done(if (title.contains("passphrase", true)) text else text.trim())
         }
     }
 
     fun manager() {
+        val body = ui.page("StremioBridge")
         val profiles =
             try {
                 store.all()
             } catch (_: Exception) {
-                toast("Saved profiles could not be read.")
+                ui.note(body, "Saved profiles could not be read.")
                 return
             }
-        menu(
-            "StremioBridge profiles",
-            profiles.map { it.name } +
-                listOf("Create profile", "Import safe template", "Restore encrypted profile"),
-        ) { n ->
-            if (n < profiles.size) {
-                original = profiles[n]
-                draft = profiles[n]
-                editor()
-            } else
-                input("Profile name", back = ::manager) { name ->
-                    original = null
-                    when (n - profiles.size) {
-                        0 -> {
-                            draft = Profile(name = name.take(64))
-                            addLinks()
-                        }
-                        1 ->
-                            input("Paste template", multi = true, back = ::manager) { raw ->
-                                try {
-                                    draft = importTemplate(raw, name.take(64))
-                                    editor()
-                                } catch (_: Exception) {
-                                    toast("Invalid profile template.")
-                                    manager()
-                                }
-                            }
-                        else -> restore(name.take(64))
-                    }
-                }
+        if (profiles.isEmpty())
+            ui.note(body, "Create a profile to combine your catalog, metadata and playback addons.")
+        for (profile in profiles) ui.card(
+            body,
+            profile.name,
+            profile.addons.count { it.enabled }.toString() +
+                " enabled addons · " +
+                profile.rows.size +
+                " Home rows",
+        ) {
+            original = profile
+            draft = profile
+            errors.clear()
+            editor()
         }
-    }
-
-    private fun editor() {
-        menu(
-            draft.name,
-            listOf(
-                "Add manifest links",
-                "Manage addons (" + draft.addons.size + ")",
-                "Home rows (" + draft.rows.size + ")",
-                "Preferred metadata addon",
-                "Save + refresh",
-                "Advanced",
-            ),
-            ::discard,
-        ) { i ->
-            when (i) {
-                0 -> addLinks()
-                1 -> addons()
-                2 -> rows()
-                3 -> preferred()
-                4 ->
-                    if (
-                        draft.addons.isEmpty() ||
-                            draft.addons.any { it.enabled && it.url.isBlank() }
-                    ) {
-                        toast("Paste an install link for each enabled addon.")
-                        editor()
-                    } else
-                        discover(draft, true) { updated ->
-                            commit(original, updated)
-                            toast("Profile saved.")
-                            manager()
-                        }
-                5 -> advanced()
+        ui.button(ui.footer, "New profile", primary = true) {
+            input("Profile name", action = "Create profile", back = ::manager) { value ->
+                original = null
+                draft = Profile(name = value.take(64))
+                errors.clear()
+                editor()
             }
         }
+        ui.button(ui.footer, "Restore encrypted backup") { restore() }
     }
 
-    private fun discard() {
-        if (original == draft || original == null && draft.addons.isEmpty()) {
+    private fun editor(message: String? = null) {
+        val body = ui.page(draft.name, ::leaveEditor)
+        if (message != null) ui.note(body, message)
+        ui.card(
+            body,
+            "Addons",
+            draft.addons.size.toString() +
+                " installed · " +
+                draft.addons.count { it.enabled } +
+                " enabled",
+            ::addons,
+        )
+        ui.card(body, "Home rows", draft.rows.size.toString() + " selected", ::rows)
+        val preferred =
+            draft.addons.find {
+                it.key == draft.preferred && it.uses("meta") && "meta" in it.manifest!!.capabilities
+            }
+        ui.card(
+            body,
+            "Metadata provider",
+            preferred?.let(::name) ?: "Follow addon order",
+            ::metadata,
+        )
+        ui.card(body, "Backup & profile", "Encrypted backup, duplicate or delete", ::advanced)
+        ui.button(
+            ui.footer,
+            "Save changes",
+            primary = true,
+            enabled = dirty() && draft.addons.isNotEmpty(),
+        ) {
+            save()
+        }
+        if (dirty()) ui.note(body, "Unsaved changes")
+    }
+
+    private fun leaveEditor() {
+        if (!dirty()) {
             manager()
             return
         }
-        AlertDialog.Builder(a)
-            .setMessage("Discard these changes?")
-            .setPositiveButton("Discard") { _, _ -> manager() }
-            .setNegativeButton("Keep editing") { _, _ -> editor() }
-            .setOnCancelListener { editor() }
+        AlertDialog.Builder(activity)
+            .setTitle("Save your changes?")
+            .setPositiveButton("Save") { _, _ -> save() }
+            .setNegativeButton("Discard") { _, _ -> manager() }
+            .setNeutralButton("Keep editing") { _, _ -> editor() }
             .show()
     }
 
-    private fun discover(p: Profile, force: Boolean, done: (Profile) -> Unit) =
-        work("Checking enabled addon manifests…", ::editor, { refresh(p, Http, force) }, done)
+    private fun save() {
+        if (draft.addons.isEmpty()) {
+            editor("Add at least one addon before saving.")
+            return
+        }
+        work("Validating changed addons…", { editor() }, { refresh(draft, Http, false) }) { checked
+            ->
+            commit(original, checked)
+            original = checked
+            draft = checked
+            toast("Profile saved")
+            editor()
+        }
+    }
 
-    private fun addLinks() =
-        input("Paste manifest links, one per line", secret = true, multi = true, back = ::editor) {
-            raw ->
-            try {
-                val added =
+    private fun addons(message: String? = null) {
+        val body = ui.page("Addons", { editor() })
+        if (message != null) ui.note(body, message)
+        if (draft.addons.isEmpty())
+            ui.note(body, "Add a configured install link from your addon’s setup page.")
+        for (addon in draft.addons) {
+            val detail =
+                listOf(host(addon), summary(addon), errors[addon.key])
+                    .filterNotNull()
+                    .filter(String::isNotBlank)
+                    .joinToString("\n")
+            ui.card(body, name(addon), detail) { addon(addon.key) }
+        }
+        ui.button(ui.footer, "Add addons", primary = true) { addLinks() }
+        if (draft.addons.isNotEmpty())
+            ui.button(ui.footer, "Refresh enabled manifests") {
+                refreshManifests(draft.addons.filter { it.enabled }.map { it.key }.toSet()) {
+                    addons(it)
+                }
+            }
+    }
+
+    private fun addLinks(value: String = "") {
+        input(
+            "Add addons",
+            value,
+            secret = true,
+            multiline = true,
+            action = "Discover addons",
+            back = { addons() },
+        ) { raw ->
+            val added =
+                try {
                     raw.lines()
                         .map(String::trim)
                         .filter(String::isNotEmpty)
                         .map { Endpoint(it).manifest }
                         .distinct()
-                        .filter { url -> draft.addons.none { it.url == url } }
+                        .filter { link -> draft.addons.none { it.url == link } }
                         .map { Addon(freshId(), it) }
-                if (added.isEmpty()) {
-                    toast("These links are already in this profile.")
-                    editor()
-                } else {
-                    draft = draft.copy(addons = draft.addons + added)
-                    discover(draft, false) {
-                        draft = it
-                        rows()
-                    }
+                } catch (e: BridgeFailure) {
+                    toast(e.message.orEmpty())
+                    addLinks(raw)
+                    return@input
                 }
-            } catch (e: BridgeFailure) {
-                toast(e.message.orEmpty())
-                editor()
+            if (added.isEmpty()) {
+                addons("Those install links are already in this profile.")
+                return@input
+            }
+            work(
+                "Discovering addons…",
+                { addLinks(raw) },
+                { refresh(draft.copy(addons = draft.addons + added), Http, false) },
+            ) {
+                draft = it
+                addons("Added " + added.size + " addons. Choose visible catalogs under Home rows.")
             }
         }
-
-    private fun label(item: Addon) =
-        (draft.addons.indexOf(item) + 1).toString() +
-            ". " +
-            (item.manifest?.name ?: "Paste install link") +
-            (if (item.enabled) "" else " (off)")
-
-    private fun addons() =
-        menu("Addon priority", draft.addons.map(::label) + "Add manifest links", ::editor) { i ->
-            if (i == draft.addons.size) addLinks() else addon(i)
-        }
-
-    private fun replace(i: Int, item: Addon) {
-        draft = draft.copy(addons = draft.addons.toMutableList().apply { set(i, item) })
     }
 
-    private fun <T> move(items: List<T>, i: Int, to: Int) =
-        items.toMutableList().apply { add(to.coerceIn(indices), removeAt(i)) }
+    private fun refreshManifests(keys: Set<String>, done: (String) -> Unit) {
+        if (keys.isEmpty()) {
+            done("Enable an addon to refresh its manifest.")
+            return
+        }
+        work("Refreshing manifests…", { addons() }, { refreshSelected(draft, Http, keys) }) {
+            draft = it.profile
+            keys.forEach(errors::remove)
+            errors.putAll(it.failures)
+            done(
+                if (it.failures.isEmpty()) "Manifests refreshed. Save changes to keep them."
+                else
+                    (keys.size - it.failures.size).toString() +
+                        " refreshed · " +
+                        it.failures.size +
+                        " failed. Previous working manifests retained."
+            )
+        }
+    }
 
-    private fun addon(i: Int) {
-        val item = draft.addons[i]
-        val stamp =
+    private fun addon(key: String) {
+        val item = draft.addons.find { it.key == key } ?: return addons()
+        val body = ui.page(name(item), { addons() })
+        ui.note(body, host(item))
+        ui.toggle(body, "Enabled", item.enabled) {
+            replaceAddon(key, draft.addons.first { a -> a.key == key }.copy(enabled = it))
+            addon(key)
+        }
+        ui.section(body, "Use this addon for")
+        val available = item.manifest?.capabilities.orEmpty()
+        if (available.isEmpty()) ui.note(body, "Refresh the manifest to discover supported roles.")
+        for (role in available) ui.toggle(body, roleNames.getValue(role), role in item.switches) {
+            on ->
+            val current = draft.addons.first { it.key == key }
+            replaceAddon(
+                key,
+                current.copy(
+                    switches = if (on) current.switches + role else current.switches - role
+                ),
+            )
+        }
+        val checked =
             item.checked
                 .takeIf { it > 0 }
                 ?.let { DateFormat.getDateTimeInstance().format(Date(it)) } ?: "Never"
-        menu(
-            label(item) + "\nLast checked: " + stamp,
-            listOf(
-                if (item.enabled) "Disable" else "Enable",
-                "Resource switches",
-                "Edit install link",
-                "Move up",
-                "Move down",
-                "Check now",
-                "Remove addon",
-            ),
-            ::addons,
-        ) { n ->
-            when (n) {
-                0 -> {
-                    replace(i, item.copy(enabled = !item.enabled))
-                    addons()
-                }
-                1 -> {
-                    val selected = roles.map { it in item.switches }.toBooleanArray()
-                    val names =
-                        roles.map {
-                            it +
-                                if (it in item.manifest?.capabilities.orEmpty()) ""
-                                else " (unadvertised)"
-                        }
-                    AlertDialog.Builder(a)
-                        .setTitle("Resource switches")
-                        .setMultiChoiceItems(names.toTypedArray(), selected) { _, idx, on ->
-                            selected[idx] = on
-                        }
-                        .setPositiveButton("Apply") { _, _ ->
-                            replace(
-                                i,
-                                item.copy(
-                                    switches =
-                                        roles.filterIndexed { idx, _ -> selected[idx] }.toSet()
-                                ),
-                            )
-                            addon(i)
-                        }
-                        .setNegativeButton("Back") { _, _ -> addon(i) }
-                        .setOnCancelListener { addon(i) }
-                        .show()
-                }
-                2 ->
-                    input(
-                        "Configured install link",
-                        item.url,
-                        secret = true,
-                        back = { addon(i) },
-                    ) { raw ->
-                        try {
-                            val url = Endpoint(raw).manifest
-                            if (draft.addons.any { it.key != item.key && it.url == url })
-                                throw BridgeFailure("This configuration is already in the profile.")
-                            val updated =
-                                draft.addons.toMutableList().apply {
-                                    set(i, item.copy(url = url, manifest = null, checked = 0))
-                                }
-                            discover(draft.copy(addons = updated), false) {
-                                draft = it
-                                addons()
-                            }
-                        } catch (e: BridgeFailure) {
-                            toast(e.message.orEmpty())
-                            addon(i)
-                        }
-                    }
-                3,
-                4 -> {
-                    draft = draft.copy(addons = move(draft.addons, i, i + if (n == 3) -1 else 1))
-                    addons()
-                }
-                5 ->
-                    discover(Profile(addons = listOf(item.copy(enabled = true))), true) {
-                        replace(i, it.addons.single().copy(enabled = item.enabled))
-                        addon(i)
-                    }
-                6 -> {
-                    draft =
-                        draft.copy(
-                            addons = draft.addons - item,
-                            rows = draft.rows.filterNot { it.addon == item.key },
-                            preferred = draft.preferred?.takeUnless { it == item.key },
-                        )
-                    addons()
-                }
-            }
-        }
-    }
-
-    private fun preferred() {
-        val choices =
-            draft.addons.filter { it.uses("meta") && "meta" in it.manifest!!.capabilities }
-        menu(
-            "Preferred metadata",
-            listOf("Follow addon order") +
-                choices.map { label(it) + (if (it.key == draft.preferred) " ✓" else "") },
-            ::editor,
-        ) { i ->
-            draft = draft.copy(preferred = choices.getOrNull(i - 1)?.key)
-            editor()
-        }
-    }
-
-    private fun rowName(r: Row) =
-        r.title.ifBlank {
-            (listOf(draft.catalog(r)?.name ?: r.catalog, r.type) + r.args.values).joinToString(
-                " · "
+        ui.note(body, "Manifest last fetched\n" + checked)
+        errors[key]?.let { ui.note(body, it) }
+        ui.button(body, "Refresh manifest") { refreshManifests(setOf(key)) { addon(key) } }
+        if (item.manifest?.configurable == true) {
+            ui.button(body, "Open addon settings") { openBrowser(Endpoint(item.url).configure()) }
+            ui.note(
+                body,
+                "If setup gives you a new install link, paste it under Edit install link.",
             )
         }
-
-    private fun rows() =
-        menu(
-            "Home rows in display order",
-            listOf("Add a catalog row") + draft.rows.map(::rowName),
-            ::editor,
-        ) {
-            if (it == 0) pick() else row(it - 1)
-        }
-
-    private fun row(i: Int) {
-        val r = draft.rows[i]
-        menu(rowName(r), listOf("Rename", "Move up", "Move down", "Hide from Home"), ::rows) { n ->
-            when (n) {
-                0 ->
-                    input("Row title", rowName(r), back = ::rows) { value ->
-                        draft =
-                            draft.copy(
-                                rows =
-                                    draft.rows.toMutableList().apply {
-                                        set(i, r.copy(title = value.take(100)))
-                                    }
-                            )
-                        rows()
+        ui.button(body, "Edit install link") {
+            input(
+                "Install link",
+                item.url,
+                secret = true,
+                action = "Validate link",
+                back = { addon(key) },
+            ) { raw ->
+                val endpoint =
+                    try {
+                        Endpoint(raw)
+                    } catch (e: BridgeFailure) {
+                        toast(e.message.orEmpty())
+                        addon(key)
+                        return@input
                     }
-                1,
-                2 -> {
-                    draft = draft.copy(rows = move(draft.rows, i, i + if (n == 1) -1 else 1))
-                    rows()
+                if (draft.addons.any { it.key != key && it.url == endpoint.manifest }) {
+                    toast("That configuration is already installed.")
+                    addon(key)
+                    return@input
                 }
-                3 -> {
-                    draft = draft.copy(rows = draft.rows.filterIndexed { idx, _ -> idx != i })
-                    rows()
+                work(
+                    "Validating install link…",
+                    { addon(key) },
+                    { Manifest.discover(Http.get(endpoint.manifest, false), endpoint) },
+                ) { manifest ->
+                    val current = draft.addons.first { it.key == key }
+                    replaceAddon(
+                        key,
+                        current.copy(
+                            url = endpoint.manifest,
+                            manifest = manifest,
+                            checked = System.currentTimeMillis(),
+                        ),
+                    )
+                    errors.remove(key)
+                    addon(key)
                 }
             }
         }
+        if (draft.addons.size > 1) ui.button(body, "Change addon order") { orderAddon(key) }
+        ui.button(body, "Remove addon") {
+            AlertDialog.Builder(activity)
+                .setMessage("Remove " + name(item) + " and its Home rows from this profile?")
+                .setPositiveButton("Remove") { _, _ ->
+                    draft =
+                        draft.copy(
+                            addons = draft.addons.filterNot { it.key == key },
+                            rows = draft.rows.filterNot { it.addon == key },
+                            preferred = draft.preferred?.takeUnless { it == key },
+                        )
+                    errors.remove(key)
+                    addons()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
     }
 
-    private fun pick() {
-        val all =
+    private fun orderAddon(key: String) {
+        val index = draft.addons.indexOfFirst { it.key == key }
+        val body = ui.page("Addon order", { addon(key) })
+        ui.note(
+            body,
+            "Used for metadata fallback and result collection. CloudStream applies its playback source priorities afterward.",
+        )
+        for ((label, target) in
+            listOf(
+                "Move up" to index - 1,
+                "Move down" to index + 1,
+                "Move to top" to 0,
+                "Move to bottom" to draft.addons.lastIndex,
+            )) ui.button(body, label, enabled = target in draft.addons.indices && target != index) {
+            draft = draft.copy(addons = moved(draft.addons, index, target))
+            addon(key)
+        }
+    }
+
+    private fun metadata() {
+        val body = ui.page("Metadata provider", { editor() })
+        ui.note(
+            body,
+            "Provides descriptions, artwork and episodes. Compatible addons supply fallback when needed.",
+        )
+        ui.card(body, "Follow addon order", if (draft.preferred == null) "Selected" else null) {
+            draft = draft.copy(preferred = null)
+            metadata()
+        }
+        val eligible =
+            draft.addons.filter { it.uses("meta") && "meta" in it.manifest!!.capabilities }
+        if (eligible.isEmpty())
+            ui.note(body, "Enable Details & episodes on an addon that provides metadata.")
+        for (addon in eligible) ui.card(
+            body,
+            name(addon),
+            if (draft.preferred == addon.key) "Selected" else host(addon),
+        ) {
+            draft = draft.copy(preferred = addon.key)
+            metadata()
+        }
+    }
+
+    private fun rowName(row: Row) =
+        row.title.ifBlank { catalogForRow(draft, row)?.name ?: row.catalog }
+
+    private fun rowSummary(row: Row): String {
+        val addon = draft.addons.find { it.key == row.addon }
+        val c = draft.catalog(row)
+        val state =
+            when {
+                addon == null -> "Addon removed"
+                !addon.enabled -> "Addon disabled"
+                !addon.uses("catalog") -> "Browse & search disabled"
+                c == null -> "Catalog unavailable after refresh"
+                !c.accepts(c.firstArgs(row.args)) -> "Filters need attention"
+                else -> null
+            }
+        return (listOfNotNull(addon?.let(::name), row.type, state) +
+                row.args.map { it.key + " · " + it.value })
+            .joinToString("\n")
+    }
+
+    private fun rows() {
+        val body = ui.page("Home rows", { editor() })
+        if (draft.rows.isEmpty()) ui.note(body, "Choose the catalogs you want on your Home screen.")
+        for ((index, row) in draft.rows.withIndex()) ui.card(body, rowName(row), rowSummary(row)) {
+            row(index)
+        }
+        ui.button(ui.footer, "Choose catalogs", primary = true) { picker() }
+    }
+
+    private fun row(index: Int) {
+        val item = draft.rows.getOrNull(index) ?: return rows()
+        val body = ui.page(rowName(item), ::rows)
+        ui.note(body, rowSummary(item))
+        ui.button(body, "Rename row") {
+            input("Row title", rowName(item), action = "Apply title", back = { row(index) }) {
+                draft = updateRow(draft, index, item.copy(title = it.take(100)))
+                row(index)
+            }
+        }
+        val catalog = catalogForRow(draft, item)
+        val hasFilters = catalog?.extras?.any { it.name !in setOf("skip", "search") } == true
+        if (catalog != null && (hasFilters || item.args.isNotEmpty())) {
+            ui.button(body, "Edit filters") {
+                filters(item, catalog, { row(index) }) { edited ->
+                    try {
+                        draft = updateRow(draft, index, edited)
+                        row(index)
+                    } catch (e: BridgeFailure) {
+                        toast(e.message.orEmpty())
+                        row(index)
+                    }
+                }
+            }
+            if (hasFilters)
+                ui.button(body, "Add filtered copy") {
+                    filters(item.copy(title = ""), catalog, { row(index) }) { edited ->
+                        if (draft.rows.any { it.key == edited.key }) {
+                            toast("Choose different filters for the new row.")
+                            row(index)
+                        } else {
+                            draft = draft.copy(rows = draft.rows + edited)
+                            rows()
+                        }
+                    }
+                }
+        }
+        if (draft.rows.size > 1)
+            for ((label, target) in
+                listOf(
+                    "Move up" to index - 1,
+                    "Move down" to index + 1,
+                    "Move to top" to 0,
+                    "Move to bottom" to draft.rows.lastIndex,
+                )) ui.button(
+                body,
+                label,
+                enabled = target in draft.rows.indices && target != index,
+            ) {
+                draft = draft.copy(rows = moved(draft.rows, index, target))
+                rows()
+            }
+        ui.button(body, "Remove from Home") {
+            draft = draft.copy(rows = draft.rows.filterIndexed { i, _ -> i != index })
+            rows()
+        }
+    }
+
+    private fun picker() {
+        val choices =
             draft.addons
                 .filter { it.uses("catalog") }
-                .flatMap { a ->
-                    a.manifest!!
+                .flatMap { addon ->
+                    addon.manifest!!
                         .catalogs
                         .filterNot { c -> c.extras.any { it.name == "search" && it.required } }
-                        .map { a to it }
+                        .map { addon to it }
                 }
-        val panel = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
+        val selected = linkedSetOf<String>()
+        val body = ui.page("Choose catalogs", ::rows, scrolling = false)
         val filter =
-            EditText(a).apply {
+            EditText(activity).apply {
                 hint = "Find a catalog"
                 setSingleLine()
             }
-        val list = ListView(a)
-        panel.addView(filter)
-        panel.addView(list)
-        var visible = all
-        fun show(q: String) {
+        val list = ListView(activity).apply { choiceMode = ListView.CHOICE_MODE_MULTIPLE }
+        body.addView(filter, LinearLayout.LayoutParams(-1, -2))
+        body.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
+        if (choices.isEmpty()) ui.note(body, "Enable Browse & search on a catalog addon first.")
+        var visible = choices
+        val add =
+            ui.button(ui.footer, "Add selected", primary = true, enabled = false) {
+                val rows =
+                    choices
+                        .filter { Row(it.first.key, it.second.type, it.second.id).key in selected }
+                        .map { Row(it.first.key, it.second.type, it.second.id) }
+                addRows(rows, 0, emptyList(), ::picker)
+            }
+        fun updateButton() {
+            add.text = "Add " + selected.size + " rows"
+            add.isEnabled = selected.isNotEmpty()
+            add.alpha = if (add.isEnabled) 1f else .45f
+        }
+        fun show(query: String) {
             visible =
-                all.filter { (a, c) ->
-                    (c.name + " " + c.type + " " + a.manifest!!.name).contains(q, true)
+                choices.filter { (a, c) ->
+                    (c.name + " " + c.type + " " + name(a)).contains(query, true)
                 }
             list.adapter =
                 ArrayAdapter(
-                    a,
-                    android.R.layout.simple_list_item_1,
-                    visible.map { (a, c) -> c.name + " · " + c.type + " · " + a.manifest!!.name },
+                    activity,
+                    android.R.layout.simple_list_item_multiple_choice,
+                    visible.map { (a, c) ->
+                        val onHome =
+                            draft.rows.any {
+                                it.addon == a.key && it.type == c.type && it.catalog == c.id
+                            }
+                        c.name + "\n" + c.type + " · " + name(a) + if (onHome) " · On Home" else ""
+                    },
                 )
+            visible.forEachIndexed { i, (a, c) ->
+                list.setItemChecked(i, Row(a.key, c.type, c.id).key in selected)
+            }
         }
-        show("")
+        list.setOnItemClickListener { _, _, i, _ ->
+            val (addon, catalog) = visible[i]
+            val key = Row(addon.key, catalog.type, catalog.id).key
+            if (list.isItemChecked(i)) selected.add(key) else selected.remove(key)
+            updateButton()
+        }
         filter.addTextChangedListener(
             object : TextWatcher {
                 override fun beforeTextChanged(
@@ -482,144 +655,225 @@ internal class Settings(
                     after: Int,
                 ) {}
 
+                override fun afterTextChanged(s: Editable?) {}
+
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                     show(s.toString())
                 }
-
-                override fun afterTextChanged(s: Editable?) {}
             }
         )
-        val d =
-            AlertDialog.Builder(a)
-                .setTitle("Choose a catalog")
-                .setView(panel)
-                .setNegativeButton("Back") { _, _ -> rows() }
-                .setOnCancelListener { rows() }
-                .show()
-        list.setOnItemClickListener { _, _, i, _ ->
-            d.dismiss()
-            val (addon, c) = visible[i]
-            extra(
-                Row(addon.key, c.type, c.id),
-                c.extras.filterNot { it.name in listOf("skip", "search") },
-                0,
-            )
-        }
+        show("")
     }
 
-    private fun extra(r: Row, extras: List<Extra>, i: Int) {
-        val e = extras.getOrNull(i)
-        if (e == null) {
-            if (draft.rows.none { it.key == r.key }) draft = draft.copy(rows = draft.rows + r)
-            else toast("Row already selected.")
+    private fun addRows(chosen: List<Row>, index: Int, prepared: List<Row>, cancel: () -> Unit) {
+        if (index == chosen.size) {
+            val merged = (draft.rows + prepared).distinctBy { it.key }
+            val added = merged.size - draft.rows.size
+            draft = draft.copy(rows = merged)
+            toast(
+                if (added == 0) "Selected rows are already on Home"
+                else "Added " + added + " Home rows"
+            )
             rows()
             return
         }
-        fun next(v: String?) {
-            extra(if (v == null) r else r.copy(args = r.args + (e.name to v)), extras, i + 1)
-        }
-        val options =
-            (if (e.required) emptyList() else listOf("Any")) +
-                e.options.ifEmpty { listOf("Enter value…") }
-        menu(e.name, options, ::rows) { n ->
-            if (!e.required && n == 0) next(null)
-            else if (e.options.isEmpty()) input(e.name, back = ::rows) { next(it) }
-            else next(e.options[n - if (e.required) 0 else 1])
-        }
+        val item = chosen[index]
+        val catalog =
+            catalogForRow(draft, item) ?: return addRows(chosen, index + 1, prepared, cancel)
+        if (catalog.accepts(catalog.firstArgs(item.args)))
+            addRows(chosen, index + 1, prepared + item, cancel)
+        else filters(item, catalog, cancel) { addRows(chosen, index + 1, prepared + it, cancel) }
     }
 
-    private fun copy(label: String, text: String) {
-        (a.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(
-            ClipData.newPlainText(label, text)
-        )
-    }
-
-    private fun restore(name: String) {
-        if (android.os.Build.VERSION.SDK_INT < 26) {
-            toast("Full backups require Android 8 or newer.")
-            manager()
-            return
-        }
-        input("Paste encrypted backup", multi = true, back = ::manager) { raw ->
-            input("Backup passphrase", secret = true, back = ::manager) { pass ->
-                work(
-                    "Restoring profile…",
-                    ::manager,
-                    { Backup.open(raw, pass.toCharArray(), name) },
-                ) {
-                    draft = it
-                    discover(draft, true) { p ->
-                        draft = p
-                        editor()
+    private fun filters(item: Row, catalog: Catalog, back: () -> Unit, done: (Row) -> Unit) {
+        val body = ui.page("Filters · " + catalog.name, back)
+        val current =
+            item.copy(
+                args =
+                    item.args.filter { (key, value) ->
+                        catalog.extras.any {
+                            it.name == key && (it.options.isEmpty() || value in it.options)
+                        }
                     }
-                }
+            )
+        if (current.args != item.args)
+            ui.note(body, "Unavailable filter values were cleared. Review and apply your choices.")
+        for (extra in catalog.extras.filterNot { it.name in setOf("search", "skip") }) {
+            val value = current.args[extra.name]
+            ui.card(
+                body,
+                extra.name,
+                value ?: if (extra.required) "Required · choose a value" else "Any",
+            ) {
+                chooseFilter(current, catalog, extra, back, done)
             }
         }
+        ui.button(ui.footer, "Apply filters", primary = true) {
+            if (!catalog.accepts(catalog.firstArgs(current.args)))
+                toast("Choose a valid value for every required filter.")
+            else done(current)
+        }
+    }
+
+    private fun chooseFilter(
+        item: Row,
+        catalog: Catalog,
+        extra: Extra,
+        back: () -> Unit,
+        done: (Row) -> Unit,
+    ) {
+        val returnTo = { filters(item, catalog, back, done) }
+        fun apply(value: String?) {
+            val args = item.args.toMutableMap()
+            if (value == null) args.remove(extra.name) else args[extra.name] = value
+            filters(item.copy(args = args), catalog, back, done)
+        }
+        val body = ui.page(extra.name, returnTo)
+        if (!extra.required)
+            ui.card(body, "Any", if (extra.name !in item.args) "Selected" else null) { apply(null) }
+        if (extra.options.isEmpty()) {
+            ui.button(body, "Enter value") {
+                input(
+                    extra.name,
+                    item.args[extra.name].orEmpty(),
+                    action = "Use value",
+                    back = returnTo,
+                ) {
+                    apply(it)
+                }
+            }
+        } else
+            for (option in extra.options) ui.card(
+                body,
+                option,
+                if (item.args[extra.name] == option) "Selected" else null,
+            ) {
+                apply(option)
+            }
     }
 
     private fun advanced() {
-        menu(
-            "Advanced",
-            listOf(
-                "Duplicate profile",
-                "Copy safe template",
-                "Copy encrypted full backup",
-                "Delete profile",
-            ),
-            ::editor,
-        ) { n ->
-            when (n) {
-                0 ->
-                    input("New profile name", draft.name + " copy", back = ::editor) {
-                        original = null
-                        draft = draft.copy(key = freshId(), name = it.take(64))
-                        editor()
-                    }
-                1 -> {
-                    copy("StremioBridge template", template(draft))
-                    toast("Copied slots and switches. Re-enter links and rows after import.")
-                    editor()
-                }
-                2 ->
-                    if (android.os.Build.VERSION.SDK_INT < 26) {
-                        toast("Full backups require Android 8 or newer.")
-                        advanced()
-                    } else
-                        input(
-                            "Backup passphrase (12 characters minimum)",
-                            secret = true,
-                            back = ::advanced,
-                        ) { pass ->
-                            if (pass.length < 12) {
-                                toast("Use at least 12 characters.")
-                                advanced()
-                            } else
-                                work(
-                                    "Encrypting profile…",
-                                    ::advanced,
-                                    { Backup.seal(draft, pass.toCharArray()) },
-                                ) {
-                                    copy("Encrypted StremioBridge profile", it)
-                                    toast("Encrypted profile copied.")
-                                    editor()
-                                }
-                        }
-                3 ->
-                    AlertDialog.Builder(a)
-                        .setMessage("Delete this profile and its bridge references?")
-                        .setPositiveButton("Delete") { _, _ ->
-                            try {
-                                original?.let { commit(it, null) }
-                                manager()
-                            } catch (_: Exception) {
-                                toast("Could not delete this profile.")
-                                editor()
-                            }
-                        }
-                        .setNegativeButton("Back") { _, _ -> editor() }
-                        .setOnCancelListener { editor() }
-                        .show()
+        val body = ui.page("Backup & profile", { editor() })
+        ui.card(body, "Duplicate profile", "Try a different setup in a separate profile") {
+            input(
+                "New profile name",
+                draft.name + " copy",
+                action = "Create copy",
+                back = ::advanced,
+            ) {
+                original = null
+                draft = draft.copy(key = freshId(), name = it.take(64))
+                editor()
             }
+        }
+        ui.card(body, "Export encrypted backup", "Includes addon links, roles and Home rows") {
+            export()
+        }
+        ui.card(body, "Delete profile", "Removes its setup and saved item references") {
+            AlertDialog.Builder(activity)
+                .setMessage("Delete " + draft.name + " and its bridge references?")
+                .setPositiveButton("Delete") { _, _ ->
+                    try {
+                        original?.let { commit(it, null) }
+                        manager()
+                    } catch (e: Exception) {
+                        toast((e as? BridgeFailure)?.message ?: "Could not delete profile.")
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun export() {
+        if (Build.VERSION.SDK_INT < 26) {
+            toast("Encrypted backups require Android 8 or newer.")
+            return
+        }
+        input("Backup passphrase", secret = true, action = "Encrypt backup", back = ::advanced) {
+            pass ->
+            if (pass.length < 12) {
+                toast("Use a passphrase with at least 12 characters.")
+                export()
+                return@input
+            }
+            work("Encrypting backup…", ::advanced, { Backup.seal(draft, pass.toCharArray()) }) {
+                encrypted ->
+                val body = ui.page("Encrypted backup", ::advanced)
+                ui.note(body, "Save this encrypted text and keep the passphrase separately.")
+                val text =
+                    EditText(activity).apply {
+                        setText(encrypted)
+                        minLines = 3
+                        maxLines = 6
+                        keyListener = null
+                        setTextIsSelectable(true)
+                    }
+                body.addView(text, LinearLayout.LayoutParams(-1, -2))
+                ui.button(ui.footer, "Copy encrypted backup", primary = true) {
+                    (activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(
+                            ClipData.newPlainText("Encrypted StremioBridge profile", encrypted)
+                        )
+                    toast("Encrypted backup copied")
+                }
+            }
+        }
+    }
+
+    private fun restore() {
+        if (Build.VERSION.SDK_INT < 26) {
+            toast("Encrypted backups require Android 8 or newer.")
+            return
+        }
+        input(
+            "Restore encrypted backup",
+            multiline = true,
+            action = "Enter passphrase",
+            back = ::manager,
+        ) { text ->
+            input(
+                "Backup passphrase",
+                secret = true,
+                action = "Restore profile",
+                back = ::manager,
+            ) { pass ->
+                work(
+                    "Decrypting backup…",
+                    ::manager,
+                    {
+                        try {
+                            Backup.open(text, pass.toCharArray(), "Restored profile")
+                        } catch (e: Exception) {
+                            throw BridgeFailure(
+                                "Could not decrypt the backup. Check its passphrase and complete backup text."
+                            )
+                        }
+                    },
+                ) { restored ->
+                    input(
+                        "Restored profile name",
+                        restored.name,
+                        action = "Review profile",
+                        back = ::manager,
+                    ) {
+                        original = null
+                        draft = restored.copy(name = it.take(64))
+                        errors.clear()
+                        editor(
+                            "Refresh addon manifests to discover catalogs, then save this profile."
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun openBrowser(url: String) {
+        try {
+            activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: Exception) {
+            toast("No browser could open this addon’s settings.")
         }
     }
 }

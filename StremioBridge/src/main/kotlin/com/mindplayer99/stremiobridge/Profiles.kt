@@ -107,37 +107,57 @@ internal suspend fun refresh(draft: Profile, transport: Transport, force: Boolea
         if (p.initialized) p else p.copy(rows = p.initialRows(), initialized = true)
     }
 
-internal fun template(p: Profile) =
-    JSONObject()
-        .put("stremioBridge", 1)
-        .put(
-            "slots",
-            JSONArray(
-                p.addons.map { a ->
-                    JSONObject()
-                        .put("enabled", a.enabled)
-                        .put("roles", JSONArray(roles.filter { it in a.switches }))
-                }
-            ),
-        )
-        .put("metadata", p.addons.indexOfFirst { it.key == p.preferred })
-        .toString(2)
+internal data class RefreshResult(val profile: Profile, val failures: Map<String, String>)
 
-internal fun importTemplate(raw: String, name: String): Profile {
-    require(raw.length <= 65_536)
-    val j = JSONObject(raw)
-    require(j.getInt("stremioBridge") == 1 && j.getJSONArray("slots").length() in 1..100)
-    val a =
-        j.objects("slots").map {
-            Addon(
-                freshId(),
-                "",
-                it.getBoolean("enabled"),
-                it.strings("roles").intersect(roles.toSet()),
-            )
-        }
-    require(a.size == j.getJSONArray("slots").length())
-    return Profile(name = name, addons = a, preferred = a.getOrNull(j.optInt("metadata", -1))?.key)
+/** A failed refresh retains that addon's last validated snapshot and switches. */
+internal suspend fun refreshSelected(
+    profile: Profile,
+    transport: Transport,
+    keys: Set<String>,
+): RefreshResult = coroutineScope {
+    val results =
+        profile.addons
+            .map { addon ->
+                async {
+                    if (addon.key !in keys) return@async addon to null
+                    try {
+                        val endpoint = Endpoint(addon.url)
+                        val manifest =
+                            Manifest.discover(transport.get(endpoint.manifest, false), endpoint)
+                        addon.copy(manifest = manifest, checked = System.currentTimeMillis()) to
+                            null
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        val message =
+                            when (e) {
+                                is NeedsConfiguration ->
+                                    "Setup required. Paste the configured install link from the addon’s setup page."
+                                is BridgeFailure -> e.message ?: "Manifest refresh failed."
+                                else -> "Manifest refresh failed."
+                            }
+                        addon to message
+                    }
+                }
+            }
+            .awaitAll()
+    RefreshResult(
+        profile.copy(addons = results.map { it.first }),
+        results.mapNotNull { (addon, error) -> error?.let { addon.key to it } }.toMap(),
+    )
+}
+
+internal fun catalogForRow(profile: Profile, row: Row): Catalog? =
+    profile.addons
+        .firstOrNull { it.key == row.addon }
+        ?.manifest
+        ?.catalogs
+        ?.firstOrNull { it.type == row.type && it.id == row.catalog }
+
+internal fun updateRow(profile: Profile, index: Int, replacement: Row): Profile {
+    if (profile.rows.withIndex().any { it.index != index && it.value.key == replacement.key })
+        throw BridgeFailure("This catalog and filter combination is already on Home.")
+    return profile.copy(rows = profile.rows.toMutableList().apply { set(index, replacement) })
 }
 
 internal class ProfileStore(ctx: Context) {

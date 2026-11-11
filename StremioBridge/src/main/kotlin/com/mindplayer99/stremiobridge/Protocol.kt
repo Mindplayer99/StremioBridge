@@ -121,6 +121,7 @@ internal data class Catalog(
 
 internal class Manifest(val json: JSONObject) {
     val name = json.str("name") ?: json.getString("id")
+    val configurable = json.optJSONObject("behaviorHints")?.optBoolean("configurable") == true
     val rules =
         json.optJSONArray("resources").values().mapNotNull { r ->
             when (r) {
@@ -172,7 +173,15 @@ internal class Manifest(val json: JSONObject) {
             return Manifest(
                     JSONObject(
                         raw,
-                        arrayOf("id", "name", "types", "idPrefixes", "resources", "catalogs"),
+                        arrayOf(
+                            "id",
+                            "name",
+                            "types",
+                            "idPrefixes",
+                            "resources",
+                            "catalogs",
+                            "behaviorHints",
+                        ),
                     )
                 )
                 .also {

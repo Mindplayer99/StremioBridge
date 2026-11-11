@@ -1,7 +1,5 @@
 package com.mindplayer99.stremiobridge
 
-import android.app.Activity
-import android.app.AlertDialog
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlinx.coroutines.runBlocking
@@ -10,11 +8,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import org.robolectric.shadows.ShadowAlertDialog
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], manifest = Config.NONE)
@@ -55,28 +51,6 @@ class AndroidTest {
         assertEquals(video, refs.video("one", vk))
         refs.drop("one")
         assertThrows(BridgeFailure::class.java) { other.video("one", vk) }
-    }
-
-    @Test
-    fun nativeSettingsOpensCreateProfile() {
-        val controller = Robolectric.buildActivity(Activity::class.java).setup()
-        try {
-            val a = controller.get()
-            Settings(a, ProfileStore(a)) { _, _ -> error("Unexpected save") }.manager()
-            val dialog = ShadowAlertDialog.getLatestAlertDialog()
-            assertTrue(dialog.isShowing)
-            assertEquals("Create profile", dialog.listView.adapter.getItem(0))
-            dialog.listView.performItemClick(dialog.listView.getChildAt(0), 0, 0)
-            assertEquals(
-                "Continue",
-                ShadowAlertDialog.getLatestAlertDialog()
-                    .getButton(AlertDialog.BUTTON_POSITIVE)
-                    .text
-                    .toString(),
-            )
-        } finally {
-            controller.pause().stop().destroy()
-        }
     }
 
     @Test
